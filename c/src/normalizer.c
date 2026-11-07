@@ -14,6 +14,7 @@ typedef struct {
     size_t list_depth;
     int list_item;
     int has_font, has_indent, suppressed, hides, act, root;
+    unsigned open_props;
 } Frame;
 typedef struct {
     Document *d;
@@ -22,7 +23,9 @@ typedef struct {
     int in_body, hidden, line_open, table, cell, emitted;
     size_t table_depth, next_block, cur_block, line, table_block, row, col, cell_row, cell_col, rs,
         cs;
-    size_t *occupied, occupied_cap;
+    size_t *occupied, occupied_cap, occupied_used;
+    Str missing_ends[16];
+    size_t missing_count;
 } Normalizer;
 static double rounded(double);
 static int member(Str t, const char *names) {
@@ -277,6 +280,10 @@ static int pop(Normalizer *n) {
 static int pop_open(Normalizer *n, unsigned names, unsigned stop) {
     Frame *frames = n->stack.p;
     size_t i;
+    /* Each frame includes its ancestors' properties. Reject absent targets
+     * without walking the stack; possible matches still respect stop tags. */
+    if (!n->stack.n || !(frames[n->stack.n - 1].open_props & names))
+        return 1;
     for (i = n->stack.n; i; i--) {
         unsigned props = frames[i - 1].props;
         if (props & names) {
@@ -350,7 +357,7 @@ int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
     }
     if (kind == END && n->stack.n) {
         Frame *top = (Frame *)n->stack.p + n->stack.n - 1;
-        if (ds_eq(top->tag, tag)) {
+        if (top->tag.n == tag.n && ds_bytes_equal(top->tag.p, tag.p, tag.n)) {
             if (top->props & T_BODY_HTML)
                 return 1;
             return pop(n);
@@ -365,6 +372,9 @@ int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
                : (props & (T_TR | T_SECTION)) ? T_TABLE
                : (props & T_TABLE)            ? 0
                                               : T_TABLE | T_CELL;
+        for (i = 0; i < n->missing_count; i++)
+            if (ds_eq(n->missing_ends[i], tag))
+                return 1;
         for (i = n->stack.n; i; i--) {
             Str t = ((Frame *)n->stack.p)[i - 1].tag;
             if (ds_eq(t, tag)) {
@@ -376,6 +386,12 @@ int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
             if (((Frame *)n->stack.p)[i - 1].props & stop)
                 return 1;
         }
+        /* Only a full-stack miss proves absence. A table barrier may hide a
+         * matching ancestor. Pops preserve absence; every push clears it.
+         * Keep small stacks on the direct path and bound cache lookup cost. */
+        if (n->stack.n >= 128 &&
+            n->missing_count < sizeof(n->missing_ends) / sizeof(*n->missing_ends))
+            n->missing_ends[n->missing_count++] = tag;
         return 1;
     }
     if (!n->in_body) {
@@ -415,6 +431,8 @@ int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
         f->suppressed = f->hides = f->act = f->root = 0;
         f->tag = tag;
         f->props = props;
+        f->open_props |= props;
+        n->missing_count = 0;
         if (props & T_BLOCK)
             f->block_tag = tag;
     }
@@ -465,8 +483,10 @@ int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
             n->table_block = n->next_block++;
             n->row = n->col = 0;
             n->cell = 0;
-            if (n->occupied)
-                memset(n->occupied, 0, n->occupied_cap * sizeof(size_t));
+            /* Only cell placement writes this prefix; the unused tail stays zero. */
+            if (n->occupied_used)
+                memset(n->occupied, 0, n->occupied_used * sizeof(*n->occupied));
+            n->occupied_used = 0;
         }
     } else if (props & (T_TR | T_CELL)) {
         f->act = n->table && n->table_depth == 1;
@@ -485,6 +505,8 @@ int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
             if (needed > n->occupied_cap) {
                 size_t cap = needed < 32 ? 32 : needed;
                 size_t *p;
+                if (n->occupied_cap <= SIZE_MAX / sizeof(*p) / 2 && n->occupied_cap * 2 > cap)
+                    cap = n->occupied_cap * 2;
                 if (cap > SIZE_MAX / sizeof(size_t)) {
                     snprintf(d->arena.error, sizeof(d->arena.error), "table too large");
                     return 0;
@@ -492,14 +514,16 @@ int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
                 p = ds_alloc(&d->arena, cap * sizeof(size_t));
                 if (!p)
                     return 0;
-                if (n->occupied_cap)
-                    memcpy(p, n->occupied, n->occupied_cap * sizeof(size_t));
+                if (n->occupied_used)
+                    memcpy(p, n->occupied, n->occupied_used * sizeof(*p));
                 n->occupied = p;
                 n->occupied_cap = cap;
             }
             for (i = n->col; i < needed; i++)
                 if (n->occupied[i] < n->row + n->rs)
                     n->occupied[i] = n->row + n->rs;
+            if (needed > n->occupied_used)
+                n->occupied_used = needed;
             n->cell = 1;
             n->cell_row = n->row;
             n->cell_col = n->col;

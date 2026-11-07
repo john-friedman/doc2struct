@@ -3,6 +3,7 @@
 #include <doc2struct/doc2struct.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include "pcre2.h"
 
@@ -170,9 +171,13 @@ typedef struct doc2struct_document {
 } Document;
 typedef int (*TokenSink)(void *, int, Str, const Attrs *);
 
-Str ds_str(const char *s);
-int ds_eq(Str a, Str b);
-int ds_is(Str a, const char *s);
+/* Keep these private helpers visible so literal lengths and short comparisons
+ * can be folded at each call site without link-time optimization. */
+static inline Str ds_str(const char *s) { return (Str){s, strlen(s)}; }
+static inline int ds_eq(Str a, Str b) {
+    return a.n == b.n && (!a.n || !memcmp(a.p, b.p, a.n));
+}
+static inline int ds_is(Str a, const char *s) { return a.p && ds_eq(a, ds_str(s)); }
 void *ds_alloc(Arena *, size_t);
 void *ds_alloc_uninit(Arena *, size_t);
 void ds_arena_free(Arena *);

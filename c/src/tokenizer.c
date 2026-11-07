@@ -19,6 +19,21 @@ static size_t text_end(const char *p, size_t n, int *entity) {
         }
         *entity |= amps != 0;
     }
+#elif defined(DS_NEON)
+    const uint8x16_t lt = vdupq_n_u8('<'), amp = vdupq_n_u8('&');
+    for (; n - i >= 16; i += 16) {
+        uint8x16_t data = vld1q_u8((const uint8_t *)p + i);
+        uint64_t ends = ds_neon_mask(vceqq_u8(data, lt));
+        uint64_t amps = ds_neon_mask(vceqq_u8(data, amp));
+        if (ends) {
+            unsigned offset = ds_neon_first(ends);
+            /* Entities after the first '<' belong to the next token. */
+            uint64_t before = (UINT64_C(1) << (4 * offset)) - 1;
+            *entity |= (amps & before) != 0;
+            return i + offset;
+        }
+        *entity |= amps != 0;
+    }
 #endif
     for (; i < n && p[i] != '<'; i++)
         *entity |= p[i] == '&';
@@ -57,7 +72,7 @@ static int tag_equal(const char *a, const char *b, size_t n) {
         return ((a0 ^ b0) | (a1 ^ b1)) == 0;
     }
 #endif
-    return !memcmp(a, b, n);
+    return ds_bytes_equal(a, b, n);
 }
 
 static int space_at(Str s, size_t i, size_t *k) {

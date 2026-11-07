@@ -15,12 +15,6 @@ struct Block {
     Alignment alignment;
     unsigned char data[];
 };
-Str ds_str(const char *s) {
-    Str r = {s, strlen(s)};
-    return r;
-}
-int ds_eq(Str a, Str b) { return a.n == b.n && (!a.n || !memcmp(a.p, b.p, a.n)); }
-int ds_is(Str a, const char *s) { return a.p && ds_eq(a, ds_str(s)); }
 static Block *pool_take(ArenaPool *pool, size_t capacity) {
     Block **link, **best = NULL, *block;
     if (!pool || !pool->blocks)

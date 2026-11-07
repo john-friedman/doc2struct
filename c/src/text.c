@@ -167,7 +167,8 @@ Str ds_strip(Str s, int custom) {
     return (Str){s.p ? s.p + i : NULL, j - i};
 }
 Str ds_input(Arena *a, Str s) {
-    size_t i = 0, k, j;
+    size_t prefix = ds_nonascii(s.p, s.n);
+    size_t i = prefix, k, j;
     uint32_t cp;
     char *p;
     static const uint32_t cp1252[] = {
@@ -175,13 +176,11 @@ Str ds_input(Arena *a, Str s) {
         0x2039, 0x152,  0xfffd, 0x17d,  0xfffd, 0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022,
         0x2013, 0x2014, 0x2dc,  0x2122, 0x161,  0x203a, 0x153,  0xfffd, 0x17e,  0x178};
     while (i < s.n) {
-        i += ds_nonascii(s.p + i, s.n - i);
-        if (i == s.n)
-            return s;
         cp = ds_utf8(s.p + i, s.n - i, &k);
         if (cp == 0xfffd && k == 1)
             break;
         i += k;
+        i += ds_nonascii(s.p + i, s.n - i);
     }
     if (i == s.n)
         return s;
@@ -192,7 +191,11 @@ Str ds_input(Arena *a, Str s) {
     p = ds_alloc_uninit(a, s.n * 3 + 1);
     if (!p)
         return (Str){0};
-    for (i = 0, j = 0; i < s.n; i++) {
+    /* ASCII is unchanged by either encoding. Convert everything after it,
+     * including any valid UTF-8 sequences preceding the invalid byte. */
+    if (prefix)
+        memcpy(p, s.p, prefix);
+    for (i = prefix, j = prefix; i < s.n; i++) {
         cp = (unsigned char)s.p[i];
         if (cp >= 128 && cp < 160)
             cp = cp1252[cp - 128];

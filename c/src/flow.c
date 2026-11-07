@@ -24,6 +24,8 @@ typedef struct {
 typedef struct {
     Document *document;
     Vec items, cells, parts;
+    FlowCell **grid;
+    size_t grid_cap;
     size_t block;
     size_t max_row, max_col, last_row, last_col;
     int active, table, has_coordinate, unordered;
@@ -280,9 +282,17 @@ static int table_finish(Flow *flow, Line *line) {
     }
     if (nc && nr > SIZE_MAX / nc / sizeof(Str))
         goto large;
-    grid = ds_alloc(&d->arena, nr * nc * sizeof(FlowCell *));
-    if (!grid)
-        return 0;
+    /* This grid is scratch storage. Output items and matrices own their arrays. */
+    size_t grid_size = nr * nc;
+    if (!flow->grid || grid_size > flow->grid_cap) {
+        grid = ds_alloc_uninit(&d->arena, grid_size * sizeof(*grid));
+        if (!grid)
+            return 0;
+        flow->grid = grid;
+        flow->grid_cap = grid_size;
+    }
+    grid = flow->grid;
+    memset(grid, 0, grid_size * sizeof(*grid));
     for (i = 0; i < flow->cells.n; i++) {
         FlowCell *cell = cells + i;
         for (y = 0; y < cell->rs; y++)
