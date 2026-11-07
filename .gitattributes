@@ -1,0 +1,2 @@
+# Keep vendored patches reproducible; blank context lines carry a space marker.
+c/vendor/pdfium/text_extraction.patch text eol=lf -whitespace

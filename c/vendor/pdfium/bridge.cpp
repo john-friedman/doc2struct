@@ -12,6 +12,7 @@
 #include "core/fpdfapi/page/cpdf_formobject.h"
 #include "core/fpdfapi/page/cpdf_page.h"
 #include "core/fpdfapi/page/cpdf_textobject.h"
+#include "core/fpdfapi/page/doc2struct_text_mode.h"
 #include "core/fpdfapi/parser/cpdf_dictionary.h"
 #include "core/fpdfapi/parser/cpdf_document.h"
 #include "fpdfsdk/cpdfsdk_helpers.h"
@@ -192,6 +193,11 @@ bool Initialize(FPDF_PAGE page) {
   return true;
 }
 }  // namespace
+
+FPDF_EXPORT FPDF_PAGE FPDF_CALLCONV DS_PDF_LoadTextPage(FPDF_DOCUMENT document, int index) {
+  doc2struct::ScopedTextMode text_mode(true);
+  return FPDF_LoadPage(document, index);
+}
 
 FPDF_EXPORT int FPDF_CALLCONV DS_PDF_ExtractPage(FPDF_PAGE page,DS_PDF_SINK sink,void* context) {
   stats[0]++;

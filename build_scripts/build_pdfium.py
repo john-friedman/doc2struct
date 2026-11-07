@@ -15,6 +15,8 @@ import shutil
 import subprocess
 import sys
 
+from validate_pdfium import BRIDGE_ABI
+
 ROOT=Path(__file__).resolve().parents[1]
 HERE=ROOT/'c/vendor/pdfium'
 SOURCE=ROOT/'build/pdfium'
@@ -64,6 +66,26 @@ def replace(path, old, new):
     path.write_text(text.replace(old,new,1))
 
 
+def patch_text_extraction():
+    patch=HERE/'text_extraction.patch'
+    command=['git','apply','--ignore-space-change','--whitespace=nowarn']
+    check=subprocess.run([*command,'--check',str(patch)],cwd=SOURCE,capture_output=True,text=True)
+    if check.returncode==0:
+        subprocess.run([*command,str(patch)],cwd=SOURCE,check=True)
+    else:
+        applied=subprocess.run([*command,'--reverse','--check',str(patch)],
+                               cwd=SOURCE,capture_output=True,text=True)
+        if applied.returncode:
+            raise RuntimeError('Cannot apply the text extraction patch; use a clean checkout of '
+                               'the pinned PDFium revision.\n'+check.stderr)
+    target=SOURCE/'core/fpdfapi/page/doc2struct_text_mode.h'
+    contents=(HERE/'text_mode.h').read_text(encoding='utf-8')
+    if not target.exists() or target.read_text(encoding='utf-8')!=contents:
+        target.write_text(contents,encoding='utf-8')
+    replace(SOURCE/'core/fpdfapi/page/BUILD.gn','source_set("page") {\n  sources = [',
+        'source_set("page") {\n  sources = [\n    "doc2struct_text_mode.h",')
+
+
 def runtime_key():
     arch=platform.machine().lower()
     arch={'amd64':'x86_64','aarch64':'arm64'}.get(arch,arch)
@@ -76,7 +98,7 @@ def bundle(binary, args, key, *, cross=False):
     if not cross:
         dll=ctypes.CDLL(str(binary.resolve()))
         dll.DS_PDF_BridgeVersion.restype=ctypes.c_uint
-        if dll.DS_PDF_BridgeVersion()!=1:
+        if dll.DS_PDF_BridgeVersion()!=BRIDGE_ABI:
             raise RuntimeError('Unexpected PDFium bridge ABI')
     target=HERE/'runtime'/key
     target.mkdir(parents=True,exist_ok=True)
@@ -97,7 +119,8 @@ def bundle(binary, args, key, *, cross=False):
                 parts.append(str(path.relative_to(SOURCE))+'\n\n'+path.read_text(encoding='utf-8',errors='replace'))
     (notices/'third_party.txt').write_text('\n\n'.join(parts),encoding='utf-8')
     metadata=dict(origin='doc2struct',major=149,minor=0,build=7825,patch=0,
-        revision=PDFIUM_REVISION,bridge_abi=1,platform=key,
+        revision=PDFIUM_REVISION,bridge_abi=BRIDGE_ABI,platform=key,
+        text_patch_sha256=hashlib.sha256((HERE/'text_extraction.patch').read_bytes()).hexdigest(),
         sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),gn_args=args)
     (target/'version.json').write_text(json.dumps(metadata,indent=2)+'\n')
     print('Bundled '+str(target),flush=True)
@@ -119,6 +142,7 @@ def main():
     if options.fetch: fetch()
     revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=SOURCE,text=True).strip()
     if revision!=PDFIUM_REVISION: raise RuntimeError('Unexpected PDFium source revision: '+revision)
+    patch_text_extraction()
     replace(SOURCE/'.gn','script_executable = "python3"','script_executable = "'+Path(sys.executable).as_posix()+'"')
     for name in ['bridge.cpp','bridge.h']:
         contents=(HERE/name).read_text()

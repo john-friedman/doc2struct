@@ -5,12 +5,14 @@ import hashlib
 import json
 from pathlib import Path
 
+BRIDGE_ABI = 2
+
 
 def validate(binary, *, load=True, licenses=None):
     binary = Path(binary).resolve()
     metadata = json.loads(binary.with_name('version.json').read_text(encoding='utf-8'))
-    if metadata.get('bridge_abi') != 1:
-        raise ValueError('PDFium bridge ABI must be 1')
+    if metadata.get('bridge_abi') != BRIDGE_ABI:
+        raise ValueError(f'PDFium bridge ABI must be {BRIDGE_ABI}')
     if metadata.get('sha256') != hashlib.sha256(binary.read_bytes()).hexdigest():
         raise ValueError('PDFium binary does not match version.json')
     licenses = Path(licenses) if licenses is not None else binary.parent / 'licenses'
@@ -20,8 +22,9 @@ def validate(binary, *, load=True, licenses=None):
     if load:
         runtime = ctypes.CDLL(str(binary))
         runtime.DS_PDF_BridgeVersion.restype = ctypes.c_uint
-        if runtime.DS_PDF_BridgeVersion() != 1:
+        if runtime.DS_PDF_BridgeVersion() != BRIDGE_ABI:
             raise ValueError('Unsupported PDFium bridge ABI')
+        getattr(runtime, 'DS_PDF_LoadTextPage')
     return metadata
 
 

@@ -1,0 +1,787 @@
+--- a/core/fpdfapi/page/cpdf_streamparser.cpp
++++ b/core/fpdfapi/page/cpdf_streamparser.cpp
+@@ -29,6 +29,7 @@
+ #include "core/fxcrt/check.h"
+ #include "core/fxcrt/data_vector.h"
+ #include "core/fxcrt/fx_extension.h"
++#include "core/fxcrt/fx_number.h"
+ #include "core/fxcrt/fx_safe_types.h"
+ #include "core/fxcrt/span_util.h"
+ #include "core/fxge/calculate_pitch.h"
+@@ -636,3 +637,75 @@
+ bool CPDF_StreamParser::PositionIsInBounds() const {
+   return pos_ < buf_.size();
+ }
++
++bool CPDF_StreamParser::TryReadTextArray(
++    std::vector<ByteString>& strings,
++    std::vector<float>& kernings,
++    float& initial_kerning) {
++  const uint32_t saved = pos_;
++  auto fail = [&]() {
++    pos_ = saved;
++    strings.clear();
++    kernings.clear();
++    return false;
++  };
++  strings.clear();
++  kernings.clear();
++  initial_kerning = 0;
++  while (PositionIsInBounds() && PDFCharIsWhitespace(buf_[pos_])) {
++    ++pos_;
++  }
++  if (!PositionIsInBounds() || buf_[pos_] != '[') {
++    return fail();
++  }
++  ++pos_;
++  size_t total_strings = 0;
++  while (true) {
++    const uint32_t item_start = pos_;
++    bool number = false;
++    GetNextWord(number);
++    if (!word_size_) {
++      return fail();
++    }
++    if (number) {
++      word_buffer_[word_size_] = 0;
++      const float value = FX_Number(GetWord()).GetFloat();
++      if (strings.empty()) {
++        initial_kerning += value;
++      } else {
++        kernings.back() += value;
++      }
++      continue;
++    }
++    if (GetWord() == "]") {
++      break;
++    }
++    if (word_buffer_[0] != '(' &&
++        !(word_buffer_[0] == '<' && word_size_ == 1)) {
++      return fail();
++    }
++    pos_ = item_start;
++    RetainPtr<CPDF_Object> object = ReadNextObject(false, true, 1);
++    if (!object || !object->IsString()) {
++      return fail();
++    }
++    ++total_strings;
++    ByteString value = object->GetString();
++    if (!value.IsEmpty()) {
++      strings.push_back(std::move(value));
++      kernings.push_back(0);
++    }
++  }
++  // All-number arrays retain the original individual position updates.
++  if (!total_strings) {
++    return fail();
++  }
++  bool number = false;
++  GetNextWord(number);
++  if (number || GetWord() != "TJ") {
++    return fail();
++  }
++  // Match the original handler's zero padding for empty string objects.
++  kernings.resize(total_strings, 0);
++  return true;
++}
+--- a/core/fpdfapi/page/cpdf_streamparser.h
++++ b/core/fpdfapi/page/cpdf_streamparser.h
+@@ -10,7 +10,10 @@
+ #include <stdint.h>
+ 
+ #include <array>
++#include <vector>
+ 
++#include "core/fpdfapi/parser/fpdf_parser_utility.h"
++#include "core/fxcrt/bytestring.h"
+ #include "core/fxcrt/data_vector.h"
+ #include "core/fxcrt/raw_span.h"
+ #include "core/fxcrt/retain_ptr.h"
+@@ -33,6 +36,17 @@
+   ~CPDF_StreamParser();
+ 
+   ElementType ParseNextElement();
++  bool NextIsTextArray() const {
++    size_t position = pos_;
++    while (position < buf_.size() && PDFCharIsWhitespace(buf_[position])) {
++      ++position;
++    }
++    return position < buf_.size() && buf_[position] == '[';
++  }
++  // On failure, rewind so the ordinary object reader handles the input.
++  bool TryReadTextArray(std::vector<ByteString>& strings,
++                       std::vector<float>& kernings,
++                       float& initial_kerning);
+   ByteStringView GetWord() const {
+     return ByteStringView(word_buffer_).First(word_size_);
+   }
+--- a/core/fpdfapi/page/cpdf_streamcontentparser.h
++++ b/core/fpdfapi/page/cpdf_streamcontentparser.h
+@@ -8,6 +8,7 @@
+ #define CORE_FPDFAPI_PAGE_CPDF_STREAMCONTENTPARSER_H_
+ 
+ #include <array>
++#include <map>
+ #include <memory>
+ #include <optional>
+ #include <stack>
+@@ -43,9 +44,6 @@
+ 
+ class CPDF_StreamContentParser {
+  public:
+-  static void InitializeGlobals();
+-  static void DestroyGlobals();
+-
+   CPDF_StreamContentParser(CPDF_Document* doc,
+                            RetainPtr<CPDF_Dictionary> pPageResources,
+                            RetainPtr<CPDF_Dictionary> pParentResources,
+@@ -231,6 +229,9 @@
+   RetainPtr<CPDF_Image> last_image_;
+   bool colored_ = false;
+   std::vector<std::unique_ptr<CPDF_AllStates>> state_stack_;
++  std::map<ByteString, RetainPtr<CPDF_Font>> font_cache_;
++  std::vector<ByteString> text_strings_;
++  std::vector<float> text_kernings_;
+   std::array<float, 6> type3_data_ = {};
+   std::array<ContentParam, kParamBufSize> param_buf_;
+   CPDF_PageObjectHolder::CTMMap all_ctms_;
+--- a/core/fpdfapi/page/cpdf_form.cpp
++++ b/core/fpdfapi/page/cpdf_form.cpp
+@@ -13,6 +13,7 @@
+ #include "core/fpdfapi/page/cpdf_imageobject.h"
+ #include "core/fpdfapi/page/cpdf_pageobject.h"
+ #include "core/fpdfapi/page/cpdf_pageobjectholder.h"
++#include "core/fpdfapi/page/doc2struct_text_mode.h"
+ #include "core/fpdfapi/parser/cpdf_dictionary.h"
+ #include "core/fpdfapi/parser/cpdf_stream.h"
+ #include "core/fxcrt/check_op.h"
+@@ -71,6 +72,7 @@
+ }
+ 
+ void CPDF_Form::ParseContentForType3Char(CPDF_Type3Char* pType3Char) {
++  doc2struct::ScopedTextMode keep_type3_geometry(false);
+   ParseContentInternal(nullptr, nullptr, pType3Char, nullptr);
+ }
+ 
+--- a/core/fpdfapi/page/cpdf_contentparser.cpp
++++ b/core/fpdfapi/page/cpdf_contentparser.cpp
+@@ -15,6 +15,7 @@
+ #include "core/fpdfapi/page/cpdf_page.h"
+ #include "core/fpdfapi/page/cpdf_pageobject.h"
+ #include "core/fpdfapi/page/cpdf_path.h"
++#include "core/fpdfapi/page/doc2struct_text_mode.h"
+ #include "core/fpdfapi/parser/cpdf_array.h"
+ #include "core/fpdfapi/parser/cpdf_dictionary.h"
+ #include "core/fpdfapi/parser/cpdf_stream.h"
+@@ -234,6 +235,9 @@
+ }
+ 
+ CPDF_ContentParser::Stage CPDF_ContentParser::CheckClip() {
++  if (doc2struct::text_only) {
++    return Stage::kComplete;
++  }
+   if (type3_char_) {
+     type3_char_->InitializeFromStreamData(parser_->IsColored(),
+                                           parser_->GetType3Data());
+--- a/core/fpdfapi/page/cpdf_streamcontentparser.cpp
++++ b/core/fpdfapi/page/cpdf_streamcontentparser.cpp
+@@ -8,7 +8,6 @@
+ 
+ #include <algorithm>
+ #include <array>
+-#include <map>
+ #include <memory>
+ #include <utility>
+ #include <vector>
+@@ -28,6 +27,7 @@
+ #include "core/fpdfapi/page/cpdf_shadingpattern.h"
+ #include "core/fpdfapi/page/cpdf_streamparser.h"
+ #include "core/fpdfapi/page/cpdf_textobject.h"
++#include "core/fpdfapi/page/doc2struct_text_mode.h"
+ #include "core/fpdfapi/parser/cpdf_array.h"
+ #include "core/fpdfapi/parser/cpdf_dictionary.h"
+ #include "core/fpdfapi/parser/cpdf_document.h"
+@@ -66,9 +66,6 @@
+ const char kPathOperatorCubicBezier3 = 'y';
+ const char kPathOperatorClosePath = 'h';
+ const char kPathOperatorRectangle[] = "re";
+-
+-using OpCodes = std::map<uint32_t, void (CPDF_StreamContentParser::*)()>;
+-OpCodes* g_opcodes = nullptr;
+ 
+ CFX_FloatRect GetShadingBBox(CPDF_ShadingPattern* pShading,
+                              const CFX_Matrix& matrix) {
+@@ -259,133 +256,6 @@
+ 
+ }  // namespace
+ 
+-// static
+-void CPDF_StreamContentParser::InitializeGlobals() {
+-  CHECK(!g_opcodes);
+-  g_opcodes = new OpCodes({
+-      {FXBSTR_ID('"', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_NextLineShowText_Space},
+-      {FXBSTR_ID('\'', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_NextLineShowText},
+-      {FXBSTR_ID('B', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_FillStrokePath},
+-      {FXBSTR_ID('B', '*', 0, 0),
+-       &CPDF_StreamContentParser::Handle_EOFillStrokePath},
+-      {FXBSTR_ID('B', 'D', 'C', 0),
+-       &CPDF_StreamContentParser::Handle_BeginMarkedContent_Dictionary},
+-      {FXBSTR_ID('B', 'I', 0, 0), &CPDF_StreamContentParser::Handle_BeginImage},
+-      {FXBSTR_ID('B', 'M', 'C', 0),
+-       &CPDF_StreamContentParser::Handle_BeginMarkedContent},
+-      {FXBSTR_ID('B', 'T', 0, 0), &CPDF_StreamContentParser::Handle_BeginText},
+-      {FXBSTR_ID('C', 'S', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetColorSpace_Stroke},
+-      {FXBSTR_ID('D', 'P', 0, 0),
+-       &CPDF_StreamContentParser::Handle_MarkPlace_Dictionary},
+-      {FXBSTR_ID('D', 'o', 0, 0),
+-       &CPDF_StreamContentParser::Handle_ExecuteXObject},
+-      {FXBSTR_ID('E', 'I', 0, 0), &CPDF_StreamContentParser::Handle_EndImage},
+-      {FXBSTR_ID('E', 'M', 'C', 0),
+-       &CPDF_StreamContentParser::Handle_EndMarkedContent},
+-      {FXBSTR_ID('E', 'T', 0, 0), &CPDF_StreamContentParser::Handle_EndText},
+-      {FXBSTR_ID('F', 0, 0, 0), &CPDF_StreamContentParser::Handle_FillPathOld},
+-      {FXBSTR_ID('G', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetGray_Stroke},
+-      {FXBSTR_ID('I', 'D', 0, 0),
+-       &CPDF_StreamContentParser::Handle_BeginImageData},
+-      {FXBSTR_ID('J', 0, 0, 0), &CPDF_StreamContentParser::Handle_SetLineCap},
+-      {FXBSTR_ID('K', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetCMYKColor_Stroke},
+-      {FXBSTR_ID('M', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetMiterLimit},
+-      {FXBSTR_ID('M', 'P', 0, 0), &CPDF_StreamContentParser::Handle_MarkPlace},
+-      {FXBSTR_ID('Q', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_RestoreGraphState},
+-      {FXBSTR_ID('R', 'G', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetRGBColor_Stroke},
+-      {FXBSTR_ID('S', 0, 0, 0), &CPDF_StreamContentParser::Handle_StrokePath},
+-      {FXBSTR_ID('S', 'C', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetColor_Stroke},
+-      {FXBSTR_ID('S', 'C', 'N', 0),
+-       &CPDF_StreamContentParser::Handle_SetColorPS_Stroke},
+-      {FXBSTR_ID('T', '*', 0, 0),
+-       &CPDF_StreamContentParser::Handle_MoveToNextLine},
+-      {FXBSTR_ID('T', 'D', 0, 0),
+-       &CPDF_StreamContentParser::Handle_MoveTextPoint_SetLeading},
+-      {FXBSTR_ID('T', 'J', 0, 0),
+-       &CPDF_StreamContentParser::Handle_ShowText_Positioning},
+-      {FXBSTR_ID('T', 'L', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetTextLeading},
+-      {FXBSTR_ID('T', 'c', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetCharSpace},
+-      {FXBSTR_ID('T', 'd', 0, 0),
+-       &CPDF_StreamContentParser::Handle_MoveTextPoint},
+-      {FXBSTR_ID('T', 'f', 0, 0), &CPDF_StreamContentParser::Handle_SetFont},
+-      {FXBSTR_ID('T', 'j', 0, 0), &CPDF_StreamContentParser::Handle_ShowText},
+-      {FXBSTR_ID('T', 'm', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetTextMatrix},
+-      {FXBSTR_ID('T', 'r', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetTextRenderMode},
+-      {FXBSTR_ID('T', 's', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetTextRise},
+-      {FXBSTR_ID('T', 'w', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetWordSpace},
+-      {FXBSTR_ID('T', 'z', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetHorzScale},
+-      {FXBSTR_ID('W', 0, 0, 0), &CPDF_StreamContentParser::Handle_Clip},
+-      {FXBSTR_ID('W', '*', 0, 0), &CPDF_StreamContentParser::Handle_EOClip},
+-      {FXBSTR_ID('b', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_CloseFillStrokePath},
+-      {FXBSTR_ID('b', '*', 0, 0),
+-       &CPDF_StreamContentParser::Handle_CloseEOFillStrokePath},
+-      {FXBSTR_ID('c', 0, 0, 0), &CPDF_StreamContentParser::Handle_CurveTo_123},
+-      {FXBSTR_ID('c', 'm', 0, 0),
+-       &CPDF_StreamContentParser::Handle_ConcatMatrix},
+-      {FXBSTR_ID('c', 's', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetColorSpace_Fill},
+-      {FXBSTR_ID('d', 0, 0, 0), &CPDF_StreamContentParser::Handle_SetDash},
+-      {FXBSTR_ID('d', '0', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetCharWidth},
+-      {FXBSTR_ID('d', '1', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetCachedDevice},
+-      {FXBSTR_ID('f', 0, 0, 0), &CPDF_StreamContentParser::Handle_FillPath},
+-      {FXBSTR_ID('f', '*', 0, 0), &CPDF_StreamContentParser::Handle_EOFillPath},
+-      {FXBSTR_ID('g', 0, 0, 0), &CPDF_StreamContentParser::Handle_SetGray_Fill},
+-      {FXBSTR_ID('g', 's', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetExtendGraphState},
+-      {FXBSTR_ID('h', 0, 0, 0), &CPDF_StreamContentParser::Handle_ClosePath},
+-      {FXBSTR_ID('i', 0, 0, 0), &CPDF_StreamContentParser::Handle_SetFlat},
+-      {FXBSTR_ID('j', 0, 0, 0), &CPDF_StreamContentParser::Handle_SetLineJoin},
+-      {FXBSTR_ID('k', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetCMYKColor_Fill},
+-      {FXBSTR_ID('l', 0, 0, 0), &CPDF_StreamContentParser::Handle_LineTo},
+-      {FXBSTR_ID('m', 0, 0, 0), &CPDF_StreamContentParser::Handle_MoveTo},
+-      {FXBSTR_ID('n', 0, 0, 0), &CPDF_StreamContentParser::Handle_EndPath},
+-      {FXBSTR_ID('q', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_SaveGraphState},
+-      {FXBSTR_ID('r', 'e', 0, 0), &CPDF_StreamContentParser::Handle_Rectangle},
+-      {FXBSTR_ID('r', 'g', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetRGBColor_Fill},
+-      {FXBSTR_ID('r', 'i', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetRenderIntent},
+-      {FXBSTR_ID('s', 0, 0, 0),
+-       &CPDF_StreamContentParser::Handle_CloseStrokePath},
+-      {FXBSTR_ID('s', 'c', 0, 0),
+-       &CPDF_StreamContentParser::Handle_SetColor_Fill},
+-      {FXBSTR_ID('s', 'c', 'n', 0),
+-       &CPDF_StreamContentParser::Handle_SetColorPS_Fill},
+-      {FXBSTR_ID('s', 'h', 0, 0), &CPDF_StreamContentParser::Handle_ShadeFill},
+-      {FXBSTR_ID('v', 0, 0, 0), &CPDF_StreamContentParser::Handle_CurveTo_23},
+-      {FXBSTR_ID('w', 0, 0, 0), &CPDF_StreamContentParser::Handle_SetLineWidth},
+-      {FXBSTR_ID('y', 0, 0, 0), &CPDF_StreamContentParser::Handle_CurveTo_13},
+-  });
+-}
+-
+-// static
+-void CPDF_StreamContentParser::DestroyGlobals() {
+-  delete g_opcodes;
+-  g_opcodes = nullptr;
+-}
+-
+ CPDF_StreamContentParser::CPDF_StreamContentParser(
+     CPDF_Document* document,
+     RetainPtr<CPDF_Dictionary> pPageResources,
+@@ -597,9 +467,272 @@
+ }
+ 
+ void CPDF_StreamContentParser::OnOperator(ByteStringView op) {
+-  auto it = g_opcodes->find(op.GetID());
+-  if (it != g_opcodes->end()) {
+-    (this->*it->second)();
++  // The glyph bridge consumes no painting state. Full fallback pages and
++  // Type 3 glyph programs always use the complete handlers below.
++  if (doc2struct::text_only) {
++    switch (op.GetID()) {
++      case FXBSTR_ID('B', 0, 0, 0):
++      case FXBSTR_ID('B', '*', 0, 0):
++      case FXBSTR_ID('C', 'S', 0, 0):
++      case FXBSTR_ID('F', 0, 0, 0):
++      case FXBSTR_ID('G', 0, 0, 0):
++      case FXBSTR_ID('J', 0, 0, 0):
++      case FXBSTR_ID('K', 0, 0, 0):
++      case FXBSTR_ID('M', 0, 0, 0):
++      case FXBSTR_ID('R', 'G', 0, 0):
++      case FXBSTR_ID('S', 0, 0, 0):
++      case FXBSTR_ID('S', 'C', 0, 0):
++      case FXBSTR_ID('S', 'C', 'N', 0):
++      case FXBSTR_ID('W', 0, 0, 0):
++      case FXBSTR_ID('W', '*', 0, 0):
++      case FXBSTR_ID('b', 0, 0, 0):
++      case FXBSTR_ID('b', '*', 0, 0):
++      case FXBSTR_ID('c', 's', 0, 0):
++      case FXBSTR_ID('d', 0, 0, 0):
++      case FXBSTR_ID('f', 0, 0, 0):
++      case FXBSTR_ID('f', '*', 0, 0):
++      case FXBSTR_ID('g', 0, 0, 0):
++      case FXBSTR_ID('i', 0, 0, 0):
++      case FXBSTR_ID('j', 0, 0, 0):
++      case FXBSTR_ID('k', 0, 0, 0):
++      case FXBSTR_ID('n', 0, 0, 0):
++      case FXBSTR_ID('r', 'g', 0, 0):
++      case FXBSTR_ID('r', 'i', 0, 0):
++      case FXBSTR_ID('s', 0, 0, 0):
++      case FXBSTR_ID('s', 'c', 0, 0):
++      case FXBSTR_ID('s', 'c', 'n', 0):
++      case FXBSTR_ID('s', 'h', 0, 0):
++      case FXBSTR_ID('w', 0, 0, 0):
++        return;
++      case FXBSTR_ID('c', 0, 0, 0):
++      case FXBSTR_ID('h', 0, 0, 0):
++      case FXBSTR_ID('l', 0, 0, 0):
++      case FXBSTR_ID('m', 0, 0, 0):
++      case FXBSTR_ID('r', 'e', 0, 0):
++      case FXBSTR_ID('v', 0, 0, 0):
++      case FXBSTR_ID('y', 0, 0, 0):
++        ParsePathObject();
++        return;
++      default:
++        break;
++    }
++  }
++  switch (op.GetID()) {
++    case FXBSTR_ID('"', 0, 0, 0):
++      Handle_NextLineShowText_Space();
++      return;
++    case FXBSTR_ID('\'', 0, 0, 0):
++      Handle_NextLineShowText();
++      return;
++    case FXBSTR_ID('B', 0, 0, 0):
++      Handle_FillStrokePath();
++      return;
++    case FXBSTR_ID('B', '*', 0, 0):
++      Handle_EOFillStrokePath();
++      return;
++    case FXBSTR_ID('B', 'D', 'C', 0):
++      Handle_BeginMarkedContent_Dictionary();
++      return;
++    case FXBSTR_ID('B', 'I', 0, 0):
++      Handle_BeginImage();
++      return;
++    case FXBSTR_ID('B', 'M', 'C', 0):
++      Handle_BeginMarkedContent();
++      return;
++    case FXBSTR_ID('B', 'T', 0, 0):
++      Handle_BeginText();
++      return;
++    case FXBSTR_ID('C', 'S', 0, 0):
++      Handle_SetColorSpace_Stroke();
++      return;
++    case FXBSTR_ID('D', 'P', 0, 0):
++      Handle_MarkPlace_Dictionary();
++      return;
++    case FXBSTR_ID('D', 'o', 0, 0):
++      Handle_ExecuteXObject();
++      return;
++    case FXBSTR_ID('E', 'I', 0, 0):
++      Handle_EndImage();
++      return;
++    case FXBSTR_ID('E', 'M', 'C', 0):
++      Handle_EndMarkedContent();
++      return;
++    case FXBSTR_ID('E', 'T', 0, 0):
++      Handle_EndText();
++      return;
++    case FXBSTR_ID('F', 0, 0, 0):
++      Handle_FillPathOld();
++      return;
++    case FXBSTR_ID('G', 0, 0, 0):
++      Handle_SetGray_Stroke();
++      return;
++    case FXBSTR_ID('I', 'D', 0, 0):
++      Handle_BeginImageData();
++      return;
++    case FXBSTR_ID('J', 0, 0, 0):
++      Handle_SetLineCap();
++      return;
++    case FXBSTR_ID('K', 0, 0, 0):
++      Handle_SetCMYKColor_Stroke();
++      return;
++    case FXBSTR_ID('M', 0, 0, 0):
++      Handle_SetMiterLimit();
++      return;
++    case FXBSTR_ID('M', 'P', 0, 0):
++      Handle_MarkPlace();
++      return;
++    case FXBSTR_ID('Q', 0, 0, 0):
++      Handle_RestoreGraphState();
++      return;
++    case FXBSTR_ID('R', 'G', 0, 0):
++      Handle_SetRGBColor_Stroke();
++      return;
++    case FXBSTR_ID('S', 0, 0, 0):
++      Handle_StrokePath();
++      return;
++    case FXBSTR_ID('S', 'C', 0, 0):
++      Handle_SetColor_Stroke();
++      return;
++    case FXBSTR_ID('S', 'C', 'N', 0):
++      Handle_SetColorPS_Stroke();
++      return;
++    case FXBSTR_ID('T', '*', 0, 0):
++      Handle_MoveToNextLine();
++      return;
++    case FXBSTR_ID('T', 'D', 0, 0):
++      Handle_MoveTextPoint_SetLeading();
++      return;
++    case FXBSTR_ID('T', 'J', 0, 0):
++      Handle_ShowText_Positioning();
++      return;
++    case FXBSTR_ID('T', 'L', 0, 0):
++      Handle_SetTextLeading();
++      return;
++    case FXBSTR_ID('T', 'c', 0, 0):
++      Handle_SetCharSpace();
++      return;
++    case FXBSTR_ID('T', 'd', 0, 0):
++      Handle_MoveTextPoint();
++      return;
++    case FXBSTR_ID('T', 'f', 0, 0):
++      Handle_SetFont();
++      return;
++    case FXBSTR_ID('T', 'j', 0, 0):
++      Handle_ShowText();
++      return;
++    case FXBSTR_ID('T', 'm', 0, 0):
++      Handle_SetTextMatrix();
++      return;
++    case FXBSTR_ID('T', 'r', 0, 0):
++      Handle_SetTextRenderMode();
++      return;
++    case FXBSTR_ID('T', 's', 0, 0):
++      Handle_SetTextRise();
++      return;
++    case FXBSTR_ID('T', 'w', 0, 0):
++      Handle_SetWordSpace();
++      return;
++    case FXBSTR_ID('T', 'z', 0, 0):
++      Handle_SetHorzScale();
++      return;
++    case FXBSTR_ID('W', 0, 0, 0):
++      Handle_Clip();
++      return;
++    case FXBSTR_ID('W', '*', 0, 0):
++      Handle_EOClip();
++      return;
++    case FXBSTR_ID('b', 0, 0, 0):
++      Handle_CloseFillStrokePath();
++      return;
++    case FXBSTR_ID('b', '*', 0, 0):
++      Handle_CloseEOFillStrokePath();
++      return;
++    case FXBSTR_ID('c', 0, 0, 0):
++      Handle_CurveTo_123();
++      return;
++    case FXBSTR_ID('c', 'm', 0, 0):
++      Handle_ConcatMatrix();
++      return;
++    case FXBSTR_ID('c', 's', 0, 0):
++      Handle_SetColorSpace_Fill();
++      return;
++    case FXBSTR_ID('d', 0, 0, 0):
++      Handle_SetDash();
++      return;
++    case FXBSTR_ID('d', '0', 0, 0):
++      Handle_SetCharWidth();
++      return;
++    case FXBSTR_ID('d', '1', 0, 0):
++      Handle_SetCachedDevice();
++      return;
++    case FXBSTR_ID('f', 0, 0, 0):
++      Handle_FillPath();
++      return;
++    case FXBSTR_ID('f', '*', 0, 0):
++      Handle_EOFillPath();
++      return;
++    case FXBSTR_ID('g', 0, 0, 0):
++      Handle_SetGray_Fill();
++      return;
++    case FXBSTR_ID('g', 's', 0, 0):
++      Handle_SetExtendGraphState();
++      return;
++    case FXBSTR_ID('h', 0, 0, 0):
++      Handle_ClosePath();
++      return;
++    case FXBSTR_ID('i', 0, 0, 0):
++      Handle_SetFlat();
++      return;
++    case FXBSTR_ID('j', 0, 0, 0):
++      Handle_SetLineJoin();
++      return;
++    case FXBSTR_ID('k', 0, 0, 0):
++      Handle_SetCMYKColor_Fill();
++      return;
++    case FXBSTR_ID('l', 0, 0, 0):
++      Handle_LineTo();
++      return;
++    case FXBSTR_ID('m', 0, 0, 0):
++      Handle_MoveTo();
++      return;
++    case FXBSTR_ID('n', 0, 0, 0):
++      Handle_EndPath();
++      return;
++    case FXBSTR_ID('q', 0, 0, 0):
++      Handle_SaveGraphState();
++      return;
++    case FXBSTR_ID('r', 'e', 0, 0):
++      Handle_Rectangle();
++      return;
++    case FXBSTR_ID('r', 'g', 0, 0):
++      Handle_SetRGBColor_Fill();
++      return;
++    case FXBSTR_ID('r', 'i', 0, 0):
++      Handle_SetRenderIntent();
++      return;
++    case FXBSTR_ID('s', 0, 0, 0):
++      Handle_CloseStrokePath();
++      return;
++    case FXBSTR_ID('s', 'c', 0, 0):
++      Handle_SetColor_Fill();
++      return;
++    case FXBSTR_ID('s', 'c', 'n', 0):
++      Handle_SetColorPS_Fill();
++      return;
++    case FXBSTR_ID('s', 'h', 0, 0):
++      Handle_ShadeFill();
++      return;
++    case FXBSTR_ID('v', 0, 0, 0):
++      Handle_CurveTo_23();
++      return;
++    case FXBSTR_ID('w', 0, 0, 0):
++      Handle_SetLineWidth();
++      return;
++    case FXBSTR_ID('y', 0, 0, 0):
++      Handle_CurveTo_13();
++      return;
++    default:
++      return;
+   }
+ }
+ 
+@@ -843,6 +976,9 @@
+ CPDF_ImageObject* CPDF_StreamContentParser::AddImageFromStream(
+     RetainPtr<CPDF_Stream> pStream,
+     const ByteString& name) {
++  if (doc2struct::text_only) {
++    return nullptr;
++  }
+   if (!pStream) {
+     return nullptr;
+   }
+@@ -858,6 +994,9 @@
+ CPDF_ImageObject* CPDF_StreamContentParser::AddImageFromStreamObjNum(
+     uint32_t stream_obj_num,
+     const ByteString& name) {
++  if (doc2struct::text_only) {
++    return nullptr;
++  }
+   auto pImageObj = std::make_unique<CPDF_ImageObject>(GetCurrentStreamIndex());
+   pImageObj->SetResourceName(name);
+   pImageObj->SetImage(
+@@ -1066,6 +1205,9 @@
+ }
+ 
+ void CPDF_StreamContentParser::AddPathRect(float x, float y, float w, float h) {
++  if (doc2struct::text_only) {
++    return;
++  }
+   AddPathPoint({x, y}, CFX_Path::Point::Type::kMove);
+   AddPathPoint({x + w, y}, CFX_Path::Point::Type::kLine);
+   AddPathPoint({x + w, y + h}, CFX_Path::Point::Type::kLine);
+@@ -1161,6 +1303,9 @@
+ }
+ 
+ void CPDF_StreamContentParser::Handle_ShadeFill() {
++  if (doc2struct::text_only) {
++    return;
++  }
+   RetainPtr<CPDF_ShadingPattern> pShading = FindShading(GetString(0));
+   if (!pShading) {
+     return;
+@@ -1233,6 +1378,12 @@
+ 
+ RetainPtr<CPDF_Font> CPDF_StreamContentParser::FindFont(
+     const ByteString& name) {
++  auto cached = font_cache_.find(name);
++  if (cached != font_cache_.end()) {
++    // Other form parsers can use another resource alias for the same font.
++    cached->second->SetResourceName(name);
++    return cached->second;
++  }
+   RetainPtr<CPDF_Dictionary> font_dict(
+       ToDictionary(FindResourceObj("Font", name)));
+   if (!font_dict) {
+@@ -1248,6 +1399,9 @@
+       font->AsType3Font()->SetPageResources(resources_.Get());
+       font->AsType3Font()->CheckType3FontMetrics();
+     }
++  }
++  if (font && !font->IsType3Font()) {
++    font_cache_.emplace(name, font);
+   }
+   return font;
+ }
+@@ -1534,6 +1688,9 @@
+ 
+ void CPDF_StreamContentParser::AddPathPoint(const CFX_PointF& point,
+                                             CFX_Path::Point::Type type) {
++  if (doc2struct::text_only) {
++    return;
++  }
+   // If the path point is the same move as the previous one and neither of them
+   // closes the path, then just skip it.
+   if (type == CFX_Path::Point::Type::kMove && !path_points_.empty() &&
+@@ -1559,6 +1716,9 @@
+ void CPDF_StreamContentParser::AddPathPointAndClose(
+     const CFX_PointF& point,
+     CFX_Path::Point::Type type) {
++  if (doc2struct::text_only) {
++    return;
++  }
+   path_current_ = point;
+   if (path_points_.empty()) {
+     return;
+@@ -1667,6 +1827,14 @@
+     uint32_t cost = object_holder_->GetPageObjectCount() - init_obj_count;
+     if (max_cost && cost >= max_cost) {
+       break;
++    }
++    float initial_kerning = 0;
++    if (param_count_ == 0 && syntax_->NextIsTextArray() &&
++        syntax_->TryReadTextArray(text_strings_, text_kernings_, initial_kerning)) {
++      AddTextObject(text_strings_, text_kernings_, initial_kerning);
++      text_strings_.clear();
++      text_kernings_.clear();
++      continue;
+     }
+     switch (syntax_->ParseNextElement()) {
+       case CPDF_StreamParser::ElementType::kEndOfData:
+@@ -1766,6 +1934,9 @@
+         break;
+       }
+       case CPDF_StreamParser::ElementType::kNumber: {
++        if (doc2struct::text_only) {
++          break;
++        }
+         if (nParams == 6) {
+           break;
+         }
+--- a/core/fpdfapi/page/cpdf_textobject.cpp
++++ b/core/fpdfapi/page/cpdf_textobject.cpp
+@@ -10,6 +10,7 @@
+ 
+ #include "core/fpdfapi/font/cpdf_cidfont.h"
+ #include "core/fpdfapi/font/cpdf_font.h"
++#include "core/fpdfapi/page/doc2struct_text_mode.h"
+ #include "core/fxcrt/check.h"
+ #include "core/fxcrt/fx_coordinates.h"
+ #include "core/fxcrt/span.h"
+@@ -302,6 +303,23 @@
+   const float font_size = GetFontSize();
+   const float char_space = text_state().GetCharSpace();
+   const float word_space = text_state().GetWordSpace();
++
++  // Preserve the exact origins; the glyph bridge does not use this object's
++  // aggregate bounds. Full fallback pages calculate them normally.
++  if (doc2struct::text_only && !is_vertical_writing &&
++      !font->IsType3Font() &&
++      !TextRenderingModeIsClipMode(text_state().GetTextMode())) {
++    for (size_t i = 0; i < char_codes_.size(); ++i) {
++      const uint32_t char_code = char_codes_[i];
++      char_positions_[i] = current_position;
++      const float char_width = font->GetCharWidth(char_code) * font_size / 1000;
++      current_position += char_width;
++      current_position += GetWordSpaceIfNeeded(cid_font, char_code, word_space);
++      current_position += char_space;
++      current_position -= (char_kernings_[i] * font_size) / 1000;
++    }
++    return current_position;
++  }
+ 
+   for (size_t i = 0; i < char_codes_.size(); ++i) {
+     const uint32_t char_code = char_codes_[i];
+--- a/core/fpdfapi/page/cpdf_pagemodule.cpp
++++ b/core/fpdfapi/page/cpdf_pagemodule.cpp
+@@ -8,7 +8,6 @@
+ 
+ #include "core/fpdfapi/font/cpdf_fontglobals.h"
+ #include "core/fpdfapi/page/cpdf_colorspace.h"
+-#include "core/fpdfapi/page/cpdf_streamcontentparser.h"
+ 
+ namespace pdfium {
+ 
+@@ -16,11 +15,9 @@
+   CPDF_ColorSpace::InitializeGlobals();
+   CPDF_FontGlobals::Create();
+   CPDF_FontGlobals::GetInstance()->LoadEmbeddedMaps();
+-  CPDF_StreamContentParser::InitializeGlobals();
+ }
+ 
+ void DestroyPageModule() {
+-  CPDF_StreamContentParser::DestroyGlobals();
+   CPDF_FontGlobals::Destroy();
+   CPDF_ColorSpace::DestroyGlobals();
+ }

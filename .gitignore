@@ -28,7 +28,7 @@ venv/
 *.exp
 cmake-build-*/
 
-# run.py output
+# Local experiments and generated outputs
 testing/
 
 # local filing data

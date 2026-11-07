@@ -5,8 +5,9 @@
   "build": 7825,
   "patch": 0,
   "revision": "d5960c8270a7d06203316c2d6f0ba606547fdb07",
-  "bridge_abi": 1,
+  "bridge_abi": 2,
   "platform": "win_amd64",
-  "sha256": "291cabd453555792941850a1649f0cb5299f3425160b1935e8afe4455b185af4",
+  "text_patch_sha256": "b030b2b733dd5936262553bcc19f66e2b4ba88d30ec5e197e311ec642216a1be",
+  "sha256": "83720ee1b740f321799f3514fc1654a62d7834cb59306c17db5cfa9997903c3b",
   "gn_args": "is_debug = false\nis_component_build = false\nis_official_build = true\nuse_thin_lto = true\nchrome_pgo_phase = 0\npdf_enable_v8 = false\npdf_enable_xfa = false\npdf_use_skia = false\npdf_use_partition_alloc = false\npdf_enable_fontations = false\npdf_enable_rust_png = false\nenable_rust = false\nuse_custom_libcxx = false\nclang_use_chrome_plugins = false\ntreat_warnings_as_errors = false\nsymbol_level = 0\nicu_use_data_file = false\ncompute_build_timestamp = \"//build/doc2struct_timestamp.py\"\nvisual_studio_path = \"C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools\"\nvisual_studio_version = \"2026\"\nwindows_sdk_path = \"C:/Program Files (x86)/Windows Kits/10\"\nwdk_path = \"C:/Program Files (x86)/Windows Kits/10\"\nwindows_sdk_version = \"10.0.26100.0\"\n"
 }

@@ -67,7 +67,7 @@ jobs:
         id: runtime-cache
         with:
           path: c/vendor/pdfium/runtime/${{ matrix.runtime }}
-          key: pdfium-${{ matrix.runner }}-${{ matrix.runtime }}-${{ hashFiles('build_scripts/build_pdfium.py', 'c/vendor/pdfium/bridge.cpp', 'c/vendor/pdfium/bridge.h') }}
+          key: pdfium-${{ matrix.runner }}-${{ matrix.runtime }}-${{ hashFiles('build_scripts/build_pdfium.py', 'build_scripts/validate_pdfium.py', 'c/vendor/pdfium/bridge.cpp', 'c/vendor/pdfium/bridge.h', 'c/vendor/pdfium/text_mode.h', 'c/vendor/pdfium/text_extraction.patch') }}
       - name: Build pinned private PDFium once per platform
         if: steps.runtime-cache.outputs.cache-hit != 'true'
         run: python build_scripts/build_pdfium.py --fetch --jobs 4 ${{ matrix.args }}

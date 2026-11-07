@@ -26,6 +26,7 @@ static pthread_mutex_t engine_lock = PTHREAD_MUTEX_INITIALIZER;
  X(unsigned long, FPDF_GetLastError, (void)) \
  X(int, FPDF_GetPageCount, (FPDF_DOCUMENT)) \
  X(FPDF_PAGE, FPDF_LoadPage, (FPDF_DOCUMENT, int)) \
+ X(FPDF_PAGE, DS_PDF_LoadTextPage, (FPDF_DOCUMENT, int)) \
  X(void, FPDF_ClosePage, (FPDF_PAGE)) \
  X(float, FPDF_GetPageWidthF, (FPDF_PAGE)) \
  X(float, FPDF_GetPageHeightF, (FPDF_PAGE)) \
@@ -242,6 +243,7 @@ int doc2struct_pdf_visit(Str input, doc2struct_pdf_page_sink sink,
     doc2struct_pdf_glyph *glyphs = NULL;
     size_t capacity = 0;
     int i, pages, ok = 0;
+    int text_only = 1, previous_unsupported = 0;
     if (error) error->message[0] = 0;
     if (!input.p || !input.n || !sink) return fail(error, "PDF bytes and a page sink are required");
     LOCK();
@@ -256,10 +258,11 @@ int doc2struct_pdf_visit(Str input, doc2struct_pdf_page_sink sink,
     if (pages < 0) { fail(error,"cannot read PDF page count"); goto done; }
     for (i = 0; i < pages; i++) {
         int count;
+        int reduced_page = text_only;
         doc2struct_pdf_page view = {0};
         ok = 0;
         view.index = (size_t)i;
-        page = p_FPDF_LoadPage(document, i);
+        page = reduced_page ? p_DS_PDF_LoadTextPage(document, i) : p_FPDF_LoadPage(document, i);
         if (page) {
             BridgeCopy copy = {&glyphs, &capacity, &view};
             int fast;
@@ -268,6 +271,7 @@ int doc2struct_pdf_visit(Str input, doc2struct_pdf_page_sink sink,
             fast = p_DS_PDF_ExtractPage(page, copy_bridge_glyphs, &copy);
             if (fast < 0) { fail(error,"PDF bridge extraction failed"); goto done; }
             if (fast > 0) {
+                previous_unsupported = 0;
                 p_FPDF_ClosePage(page); page = NULL;
                 UNLOCK();
                 ok = sink(context, &view);
@@ -275,6 +279,15 @@ int doc2struct_pdf_visit(Str input, doc2struct_pdf_page_sink sink,
                 if (!ok) { fail(error,"PDF page processing failed or was cancelled"); goto done; }
                 continue;
             }
+            /* Two consecutive unsupported pages disable speculative loading
+             * for this document; ordinary pages can still use the text bridge. */
+            if (previous_unsupported) text_only = 0;
+            previous_unsupported = 1;
+        }
+        /* The full text fallback requires the original page representation. */
+        if (page && reduced_page) {
+            p_FPDF_ClosePage(page);
+            page = p_FPDF_LoadPage(document, i);
         }
         if (page) text = p_FPDFText_LoadPage(page);
         if (!text || (count = p_FPDFText_CountChars(text)) < 0) {
