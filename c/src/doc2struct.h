@@ -116,9 +116,15 @@ typedef struct doc2struct_rules {
 typedef struct doc2struct_item {
     Run run;
     int fake_table;
+    unsigned casing; /* Lazy facts for assembled, immutable instruction text. */
     Vec *hrefs;
 } Item;
 typedef doc2struct_matrix Matrix;
+typedef struct {
+    Item *items;
+    size_t nitems;
+    Str display, rule;
+} TextView;
 typedef struct {
     Item *items;
     size_t nitems;
@@ -133,6 +139,7 @@ typedef struct {
     size_t ntable_cells;
     int layout_text;
     int redundant;
+    TextView *text_view;
 } Line;
 
 typedef struct ListLines {
@@ -190,6 +197,7 @@ Str ds_cat(Arena *, Str, Str);
 Str ds_join(Arena *, Str *, size_t, Str);
 Str ds_strip(Str, int);
 Str ds_lower(Arena *, Str);
+Str ds_rule_text(Arena *, Str);
 int ds_space(uint32_t);
 int ds_upper(Str);
 int ds_proper(Str);

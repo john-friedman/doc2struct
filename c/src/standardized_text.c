@@ -371,6 +371,12 @@ static int group(Document *d, Vec *lines) {
     return !d->arena.error[0];
 }
 static Str line_text(Document *, Item *, size_t);
+static Str display_text(Document *d, Line *line) {
+    TextView *view = line->text_view;
+    if (view && view->items == line->items && view->nitems == line->nitems)
+        return view->display;
+    return line_text(d, line->items, line->nitems);
+}
 static Str clean_lower(Document *d, Item *item, Str *cached) {
     if (cached && cached->p) return *cached;
     {
@@ -393,9 +399,9 @@ static int clean(Document *d, const Rules *r, Vec *lines) {
     size_t i, j, k, distinct_labels = 0;
     int dominant = 0;
     double common = r->page_label ? font_stats(d, lines, &dominant) : 0;
-    /* Within cleanup the original item slices are immutable. Cache only this
-     * pass's lowercase views, without enlarging every persistent Item/Line. */
-    if (d->no_fonts && lines->n && (r->repeat_threshold || r->page_label)) {
+    /* The original slices are immutable throughout cleanup. Reuse lowercase
+     * views between page-label detection, repetition counting and removal. */
+    if (lines->n && (r->repeat_threshold || r->page_label)) {
         size_t count = 0;
         offsets = ds_alloc_uninit(&d->arena, lines->n * sizeof(size_t));
         if (!offsets) return 0;
@@ -540,19 +546,22 @@ static double font_stats(Document *d, Vec *lines, int *dominant) {
     *dominant = best > eligible * .5;
     return common;
 }
+enum { CASING_KNOWN = 128 };
 static unsigned attrs(Item *i) {
     unsigned flags = i->run.flags;
-    if (ds_upper(i->run.text))
-        flags |= ALL_CAPS;
-    else if (ds_proper(i->run.text))
-        flags |= PROPER_CASE;
+    if (!i->casing) {
+        i->casing = CASING_KNOWN; /* Cache negative results as well. */
+        if (ds_upper(i->run.text)) i->casing |= ALL_CAPS;
+        else if (ds_proper(i->run.text)) i->casing |= PROPER_CASE;
+    }
+    flags |= i->casing & (ALL_CAPS | PROPER_CASE);
     if (i->fake_table)
         flags |= FAKE_TABLE;
     return flags;
 }
 static int phone_line(Document *d, Line *line) {
     Str first = line->nitems ? ds_strip(line->items[0].run.text, 0) : (Str){0};
-    return first.n && first.p[0] == '(' && ds_phone(line_text(d, line->items, line->nitems));
+    return first.n && first.p[0] == '(' && ds_phone(display_text(d, line));
 }
 /* Reuse the regex compiler's conservative mandatory-first-atom guard before
  * allocating normalized copies of ordinary body paragraphs. */
@@ -597,29 +606,19 @@ static int header_candidate(const Rules *r, Line *line) {
 /* Rules see the complete logical line, with HTML whitespace normalized.
  * Display text retains its original whitespace and capitalization. */
 static Str rule_text(Document *d, Line *line) {
-    Str source = ds_lower(&d->arena, line_text(d, line->items, line->nitems));
-    char *buffer;
-    size_t i, k, used = 0;
-    int space = 0;
-    if (!source.p)
-        return source;
-    buffer = ds_alloc_uninit(&d->arena, source.n + 1);
-    if (!buffer)
-        return (Str){0};
-    for (i = 0; i < source.n; i += k) {
-        uint32_t c = ds_utf8(source.p + i, source.n - i, &k);
-        if (ds_space(c) || c == 0x200b) {
-            space = used != 0;
-            continue;
-        }
-        if (space)
-            buffer[used++] = ' ';
-        memcpy(buffer + used, source.p + i, k);
-        used += k;
-        space = 0;
+    TextView *view = line->text_view;
+    /* Cleanup and heading splitting create slices of the original items.
+     * Share immutable views only while the complete slice still matches. */
+    if (!view || view->items != line->items || view->nitems != line->nitems) {
+        view = ds_alloc(&d->arena, sizeof(*view));
+        if (!view) return (Str){0};
+        view->items = line->items;
+        view->nitems = line->nitems;
+        view->display = line_text(d, line->items, line->nitems);
+        line->text_view = view;
     }
-    buffer[used] = 0;
-    return (Str){buffer, used};
+    if (!view->rule.p) view->rule = ds_rule_text(&d->arena, view->display);
+    return view->rule;
 }
 static int header_match(Document *d, const Rules *r, Line *line, Str text) {
     size_t j;
@@ -708,7 +707,7 @@ static int italic_prose(Document *d, Line *line, int big) {
     if (!first || big || !(first->run.flags & ITALIC) ||
         (first->run.flags & (BOLD | CENTERED | UNDERLINE)) || semantic_heading(&first->run))
         return 0;
-    text = ds_strip(line_text(d, line->items, line->nitems), 1);
+    text = ds_strip(display_text(d, line), 1);
     for (i = 0; i < text.n; i++) {
         int space = text.p[i] == ' ' || text.p[i] == '\n' || text.p[i] == '\t';
         if (!space && !in_word)
@@ -952,6 +951,7 @@ static int layout_tables(Document *d, const Rules *r, Vec *lines) {
                 for (k = c; k < j; k++) {
                     Item item = source.table_cells[k];
                     item.run.text = ds_strip(item.run.text, 1);
+                    item.casing = 0;
                     if (!item.run.text.n)
                         continue;
                     nonempty++;
@@ -1075,7 +1075,7 @@ static int build(Document *d, Vec *lines) {
             r = add_row(d, stack.n - 1, ds_str("title"), ln->klass);
             if (!r)
                 return 0;
-            r->text = line_text(d, ln->items, ln->nitems);
+            r->text = display_text(d, ln);
             r->title = ln->title.n ? ln->title : (Str){0};
             r->items = ln->items;
             r->nitems = ln->nitems;
@@ -1085,7 +1085,7 @@ static int build(Document *d, Vec *lines) {
             *p = ln->level;
             continue;
         }
-        text = ds_strip(line_text(d, ln->items, ln->nitems), 1);
+        text = ds_strip(display_text(d, ln), 1);
         if (text.n) {
             Vec items = {0};
             for (j = 0; j < ln->nitems; j++)

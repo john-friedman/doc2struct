@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define DOC2STRUCT_VERSION "0.1.1"
+#define DOC2STRUCT_VERSION "0.1.2"
 #define DOC2STRUCT_DEFAULT_CACHE_SIZE ((size_t)8 * 1024 * 1024)
 typedef struct doc2struct_rules doc2struct_rules;
 typedef struct doc2struct_parser doc2struct_parser;

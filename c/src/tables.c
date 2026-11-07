@@ -1,4 +1,5 @@
 #include "doc2struct.h"
+#include "scan.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -9,6 +10,22 @@ const char *ds_cleanup_names[] = {
     "unresolved_formatting_cells", "unresolved_header_alignment",
     "ambiguous_text_attachment", NULL
 };
+
+enum {
+    CELL_PRESENT = 1, CELL_NUMERIC = 2, CELL_YEAR = 4, CELL_DIGIT = 8,
+    CELL_PREFIX = 16, CELL_SUFFIX = 32, CELL_FORMATTING = 64
+};
+typedef struct {
+    Matrix *matrix;
+    unsigned char *facts;
+    int formatting;
+} TableState;
+
+static unsigned char cell_facts(Str, int);
+static void replace_cell(TableState *table, size_t index, Str text) {
+    table->matrix->cells[index] = text;
+    table->facts[index] = cell_facts(text, table->formatting);
+}
 
 static int numeric(Str text) {
     size_t i, k;
@@ -53,8 +70,10 @@ static int year(Str text) {
 }
 static int same_cell(Str a, Str b) { return a.p == b.p && a.n == b.n; }
 static int has_digit(Str text) {
-    size_t i;
-    for (i = 0; i < text.n; i++)
+    size_t i = 0;
+    for (; text.n - i >= 16; i += 16)
+        if (ds_ascii_masks(text.p + i).digit) return 1;
+    for (; i < text.n; i++)
         if (text.p[i] >= '0' && text.p[i] <= '9')
             return 1;
     return 0;
@@ -64,18 +83,19 @@ static int dash(Str text) {
 }
 /* Expanded colspans repeat the same source slice. When attaching formatting
  * to that value, retain one logical value rather than an unformatted copy. */
-static void clear_copies(Matrix *m, size_t row, size_t col) {
+static void clear_copies(TableState *table, size_t row, size_t col) {
+    Matrix *m = table->matrix;
     size_t c;
     Str source = m->cells[row * m->nc + col];
     for (c = 0; c < m->nc; c++)
         if (c != col && same_cell(source, m->cells[row * m->nc + c]))
-            m->cells[row * m->nc + c] = ds_str("");
+            replace_cell(table, row * m->nc + c, ds_str(""));
 }
 
 /* A right-aligned year can label a range spread across formatting cells.
  * Join two endpoints only within one year group and without Low/High-style
  * subheaders. Other multi-value columns remain unchanged. */
-static int merge_ranges(Document *d, Row *row) {
+static int merge_ranges(Document *d, Row *row, TableState *table) {
     Matrix *m = &row->matrix;
     size_t h, c, n = 0, i, g, *ends;
     if (m->nc < 3)
@@ -88,7 +108,7 @@ static int merge_ranges(Document *d, Row *row) {
         n = 0;
         for (c = 0; c < m->nc; c++) {
             Str value = m->cells[h * m->nc + c];
-            if (!year(value))
+            if (!(table->facts[h * m->nc + c] & CELL_YEAR))
                 continue;
             if (n && c == ends[n - 1] + 1 && same_cell(value, previous))
                 ends[n - 1] = c;
@@ -111,7 +131,7 @@ static int merge_ranges(Document *d, Row *row) {
                 Str value = m->cells[i * m->nc + c];
                 if (!value.n)
                     continue;
-                if (numeric(value)) {
+                if (table->facts[i * m->nc + c] & CELL_NUMERIC) {
                     if (!count)
                         low = c;
                     high = c;
@@ -137,9 +157,9 @@ static int merge_ranges(Document *d, Row *row) {
                     endpoint++;
                 if ((first == '-' || first == 0x2013) && endpoint < last.n &&
                     last.p[endpoint] >= '0' && last.p[endpoint] <= '9') {
-                    m->cells[i * m->nc + high] =
-                        ds_cat(&d->arena, m->cells[i * m->nc + low], last);
-                    m->cells[i * m->nc + low] = ds_str("");
+                    replace_cell(table, i * m->nc + high,
+                                 ds_cat(&d->arena, m->cells[i * m->nc + low], last));
+                    replace_cell(table, i * m->nc + low, ds_str(""));
                     row->cleaned |= DS_MERGED_RANGES;
                 }
             }
@@ -148,24 +168,23 @@ static int merge_ranges(Document *d, Row *row) {
     return !d->arena.error[0];
 }
 
-static void diagnose(Row *row) {
+static void diagnose(Row *row, const TableState *table) {
     Matrix *m = &row->matrix;
     size_t i, j, h;
     for (i = 0; i < m->nr * m->nc; i++)
-        if (ds_is(m->cells[i], "$") || ds_is(m->cells[i], "(") ||
-            ds_is(m->cells[i], ")"))
+        if (table->facts[i] & CELL_FORMATTING)
             row->cleaned |= DS_TABLE_FORMATTING;
     for (h = 0; h < m->nr && h < 8; h++) {
         size_t years = 0;
         for (j = 0; j < m->nc; j++)
-            years += year(m->cells[h * m->nc + j]);
+            years += (table->facts[h * m->nc + j] & CELL_YEAR) != 0;
         if (years < 2)
             continue;
         for (j = 1; j < m->nc; j++) {
             if (m->cells[h * m->nc + j].n)
                 continue;
             for (i = h + 1; i < m->nr; i++)
-                if (numeric(m->cells[i * m->nc + j])) {
+                if (table->facts[i * m->nc + j] & CELL_NUMERIC) {
                     row->cleaned |= DS_TABLE_ALIGNMENT;
                     break;
                 }
@@ -190,37 +209,75 @@ static int format(Str s, int which) {
     }
     return which == 2 ? 0 : found;
 }
+
+/* The original classifiers define the semantics, including Unicode currency
+ * and alphabetic footnotes. Compute their results once per cell version. */
+static unsigned char cell_facts(Str text, int formatting) {
+    unsigned char facts = 0;
+    if (!text.n) return facts;
+    if (!blank(text)) facts |= CELL_PRESENT;
+    if (numeric(text)) facts |= CELL_NUMERIC;
+    if (year(text)) facts |= CELL_YEAR;
+    if (formatting) {
+        if (has_digit(text)) facts |= CELL_DIGIT;
+        if (format(text, 0)) facts |= CELL_PREFIX;
+        if (format(text, 1)) facts |= CELL_SUFFIX;
+    }
+    if (text.n == 1 && (text.p[0] == '$' || text.p[0] == '(' || text.p[0] == ')'))
+        facts |= CELL_FORMATTING;
+    return facts;
+}
+
 static int enabled(const Rules *r, unsigned i) { return (r->table_steps & (1u << i)) != 0; }
-static void select_rows(Matrix *m, unsigned char *keep) {
+static void select_rows(TableState *table, unsigned char *keep) {
+    Matrix *m = table->matrix;
     size_t i, j = 0;
     for (i = 0; i < m->nr; i++)
         if (keep[i]) {
-            if (i != j)
+            if (i != j) {
                 memmove(m->cells + j * m->nc, m->cells + i * m->nc, m->nc * sizeof(Str));
+                memmove(table->facts + j * m->nc, table->facts + i * m->nc, m->nc);
+            }
             j++;
         }
     m->nr = j;
 }
-static void select_cols(Matrix *m, unsigned char *keep) {
+static void select_cols(TableState *table, unsigned char *keep) {
+    Matrix *m = table->matrix;
     size_t i, j, k = 0, nc = 0;
     for (j = 0; j < m->nc; j++)
         nc += keep[j] != 0;
     for (i = 0; i < m->nr; i++)
         for (j = 0; j < m->nc; j++)
-            if (keep[j])
+            if (keep[j]) {
+                table->facts[k] = table->facts[i * m->nc + j];
                 m->cells[k++] = m->cells[i * m->nc + j];
+            }
     m->nc = nc;
 }
-static int clean_table(Document *d, const Rules *r, Row *row) {
+static int clean_table(Document *d, const Rules *r, Row *row, Vec *scratch) {
     Matrix *m = &row->matrix;
-    size_t i, j, k;
+    TableState table = {m, NULL, enabled(r, 1)};
+    size_t i, j, k, count = m->nr * m->nc;
     unsigned char *keep, *data_columns;
     row->cleaned = 0;
+    /* Facts are scratch data: retain one buffer across this document's tables. */
+    if (!scratch->p || count > scratch->cap) {
+        size_t capacity = count;
+        if (scratch->cap <= SIZE_MAX / 2 && scratch->cap * 2 > capacity)
+            capacity = scratch->cap * 2;
+        scratch->p = ds_alloc_uninit(&d->arena, capacity);
+        if (!scratch->p) return 0;
+        scratch->cap = capacity;
+    }
+    table.facts = scratch->p;
     for (i = 0; i < m->nr * m->nc; i++) {
         Str stripped = ds_strip(m->cells[i], 1);
         if (stripped.n != m->cells[i].n)
             row->cleaned |= DS_TRIMMED_CELLS;
         m->cells[i] = stripped;
+        table.facts[i] = i && same_cell(stripped, m->cells[i - 1]) ? table.facts[i - 1] :
+                        cell_facts(stripped, table.formatting);
     }
     if (enabled(r, 1)) {
         data_columns = ds_alloc(&d->arena, m->nc);
@@ -228,22 +285,22 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
             return 0;
         for (i = 0; i < m->nr; i++)
             for (j = 0; j < m->nc; j++) {
-                Str value = m->cells[i * m->nc + j];
-                if (has_digit(value) && numeric(value) && !year(value))
+                unsigned char facts = table.facts[i * m->nc + j];
+                if ((facts & (CELL_DIGIT | CELL_NUMERIC | CELL_YEAR)) == (CELL_DIGIT | CELL_NUMERIC))
                     data_columns[j] = 1;
             }
         for (i = 0; i < m->nr; i++)
             for (j = 0; j < m->nc; j++) {
                 Str t = m->cells[i * m->nc + j];
-                if (format(t, 0) && !(dash(t) && data_columns[j]))
+                if ((table.facts[i * m->nc + j] & CELL_PREFIX) && !(dash(t) && data_columns[j]))
                     for (k = j + 1; k < m->nc; k++)
                         if (m->cells[i * m->nc + k].n) {
                             Str next = m->cells[i * m->nc + k];
-                            if (numeric(next) || format(next, 0)) {
-                                clear_copies(m, i, j);
-                                clear_copies(m, i, k);
-                                m->cells[i * m->nc + k] = ds_cat(&d->arena, t, next);
-                                m->cells[i * m->nc + j] = ds_str("");
+                            if (table.facts[i * m->nc + k] & (CELL_NUMERIC | CELL_PREFIX)) {
+                                clear_copies(&table, i, j);
+                                clear_copies(&table, i, k);
+                                replace_cell(&table, i * m->nc + k, ds_cat(&d->arena, t, next));
+                                replace_cell(&table, i * m->nc + j, ds_str(""));
                                 row->cleaned |= DS_MERGED_FORMATTING;
                             }
                             break;
@@ -252,54 +309,44 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
         for (i = 0; i < m->nr; i++)
             for (j = 0; j < m->nc; j++) {
                 Str t = m->cells[i * m->nc + j];
-                if (format(t, 1) && !(dash(t) && data_columns[j]))
+                if ((table.facts[i * m->nc + j] & CELL_SUFFIX) && !(dash(t) && data_columns[j]))
                     for (k = j; k; k--)
                         if (m->cells[i * m->nc + k - 1].n) {
-                            if (numeric(m->cells[i * m->nc + k - 1])) {
-                                clear_copies(m, i, j);
-                                clear_copies(m, i, k - 1);
-                                m->cells[i * m->nc + k - 1] =
-                                    ds_cat(&d->arena, m->cells[i * m->nc + k - 1], t);
-                                m->cells[i * m->nc + j] = ds_str("");
+                            if (table.facts[i * m->nc + k - 1] & CELL_NUMERIC) {
+                                clear_copies(&table, i, j);
+                                clear_copies(&table, i, k - 1);
+                                replace_cell(&table, i * m->nc + k - 1,
+                                             ds_cat(&d->arena, m->cells[i * m->nc + k - 1], t));
+                                replace_cell(&table, i * m->nc + j, ds_str(""));
                                 row->cleaned |= DS_MERGED_FORMATTING;
                             }
                             break;
                         }
             }
-        if (!merge_ranges(d, row))
+        if (!merge_ranges(d, row, &table))
             return 0;
     }
     keep = ds_alloc(&d->arena, m->nr > m->nc ? m->nr : m->nc);
     if (!keep)
         return 0;
     if (enabled(r, 2)) {
-        for (i = 0; i < m->nr; i++) {
-            keep[i] = 0;
-            for (j = 0; j < m->nc; j++)
-                if (!blank(m->cells[i * m->nc + j])) {
-                    keep[i] = 1;
-                    break;
-                }
-        }
+        for (i = 0; i < m->nr; i++)
+            keep[i] = ds_flags_any(table.facts + i * m->nc, m->nc, CELL_PRESENT);
         {
             size_t before = m->nr;
-            select_rows(m, keep);
+            select_rows(&table, keep);
             if (before != m->nr)
                 row->cleaned |= DS_EMPTY_ROWS;
         }
     }
     if (enabled(r, 3) && m->nr && m->nc) {
-        for (j = 0; j < m->nc; j++) {
-            keep[j] = 0;
-            for (i = 0; i < m->nr; i++)
-                if (!blank(m->cells[i * m->nc + j])) {
-                    keep[j] = 1;
-                    break;
-                }
-        }
+        size_t missing = m->nc;
+        memset(keep, 0, m->nc);
+        for (i = 0; i < m->nr && missing; i++)
+            missing -= ds_flags_columns(keep, table.facts + i * m->nc, m->nc, CELL_PRESENT);
         {
             size_t before = m->nc;
-            select_cols(m, keep);
+            select_cols(&table, keep);
             if (before != m->nc)
                 row->cleaned |= DS_EMPTY_COLUMNS;
         }
@@ -309,7 +356,7 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
         for (i = m->nr; i > 1; i--) {
             size_t a = i - 1, b = i - 2;
             for (j = 0; j < m->nc; j++)
-                if (!blank(m->cells[a * m->nc + j]) &&
+                if ((table.facts[a * m->nc + j] & CELL_PRESENT) &&
                     !same_cell(m->cells[a * m->nc + j], m->cells[b * m->nc + j]))
                     break;
             if (j == m->nc)
@@ -317,7 +364,7 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
         }
         {
             size_t before = m->nr;
-            select_rows(m, keep);
+            select_rows(&table, keep);
             if (before != m->nr)
                 row->cleaned |= DS_SPAN_ROWS;
         }
@@ -326,7 +373,7 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
         memset(keep, 1, m->nr);
         for (i = 0; i + 1 < m->nr; i++) {
             for (j = 0; j < m->nc; j++)
-                if (!blank(m->cells[i * m->nc + j]) &&
+                if ((table.facts[i * m->nc + j] & CELL_PRESENT) &&
                     !same_cell(m->cells[i * m->nc + j], m->cells[(i + 1) * m->nc + j]))
                     break;
             if (j == m->nc)
@@ -334,7 +381,7 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
         }
         {
             size_t before = m->nr;
-            select_rows(m, keep);
+            select_rows(&table, keep);
             if (before != m->nr)
                 row->cleaned |= DS_SPAN_ROWS;
         }
@@ -345,7 +392,7 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
             for (j = 0; j + 1 < m->nc; j++) {
                 size_t a = k == 6 ? j : j + 1, b = k == 6 ? j + 1 : j;
                 for (i = 0; i < m->nr; i++)
-                    if (!blank(m->cells[i * m->nc + a]) &&
+                    if ((table.facts[i * m->nc + a] & CELL_PRESENT) &&
                         !same_cell(m->cells[i * m->nc + a], m->cells[i * m->nc + b]))
                         break;
                 if (i == m->nr)
@@ -353,7 +400,7 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
             }
             {
                 size_t before = m->nc;
-                select_cols(m, keep);
+                select_cols(&table, keep);
                 if (before != m->nc)
                     row->cleaned |= DS_SPAN_COLUMNS;
             }
@@ -361,7 +408,7 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
     if (enabled(r, 8) && m->nr >= 2) {
         int header = 1;
         for (i = 0; i < 2 * m->nc; i++)
-            if (numeric(m->cells[i]) && !year(m->cells[i]))
+            if ((table.facts[i] & (CELL_NUMERIC | CELL_YEAR)) == CELL_NUMERIC)
                 header = 0;
         for (j = 0; header && j + 1 < m->nc; j++)
             if (m->cells[j].n && same_cell(m->cells[j], m->cells[j + 1]))
@@ -370,15 +417,17 @@ static int clean_table(Document *d, const Rules *r, Row *row) {
             for (j = 0; j < m->nc; j++)
                 if (!ds_eq(m->cells[j], m->cells[m->nc + j])) {
                     Str parts[] = {m->cells[j], m->cells[m->nc + j]};
-                    m->cells[j] = ds_join(&d->arena, parts, 2, ds_str("\n"));
+                    replace_cell(&table, j, ds_join(&d->arena, parts, 2, ds_str("\n")));
                 }
-            if (m->nr > 2)
+            if (m->nr > 2) {
                 memmove(m->cells + m->nc, m->cells + 2 * m->nc, (m->nr - 2) * m->nc * sizeof(Str));
+                memmove(table.facts + m->nc, table.facts + 2 * m->nc, (m->nr - 2) * m->nc);
+            }
             m->nr--;
             row->cleaned |= DS_MERGED_HEADERS;
         }
     }
-    diagnose(row);
+    diagnose(row, &table);
     return !d->arena.error[0];
 }
 static int text_row(Row *r) { return ds_is(r->type, "text") || ds_is(r->type, "textsmall"); }
@@ -574,11 +623,12 @@ static int absorb(Document *d, const Rules *r) {
 }
 int ds_tables(Document *d, const Rules *r) {
     Row *rows = d->rows.p;
+    Vec scratch = {0};
     size_t i, j, out = 0;
     for (i = 0; i < d->rows.n; i++) {
         Row row = rows[i];
         if (ds_is(row.type, "table")) {
-            if (!clean_table(d, r, &row))
+            if (!clean_table(d, r, &row, &scratch))
                 return 0;
             if (!row.matrix.nr)
                 continue;

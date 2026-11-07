@@ -101,6 +101,152 @@ static inline uint8x16_t ds_neon_upper(uint8x16_t bytes) {
 }
 #endif
 
+/* These masks are temporary register data, shared by higher-level analyses.
+ * NEON uses four bits per byte; SSE2 and scalar code use one. */
+#ifdef DS_NEON
+#define DS_MASK_STEP 4
+#else
+#define DS_MASK_STEP 1
+#endif
+typedef struct {
+    uint64_t upper, lower, digit, space, plain_space, nonascii;
+} AsciiMasks;
+
+static inline unsigned ds_mask_first(uint64_t mask) {
+#ifdef DS_SSE2
+    return ds_first_bit((unsigned)mask);
+#elif defined(DS_NEON)
+    return ds_neon_first(mask);
+#else
+    unsigned i = 0;
+    while (!(mask & 1)) { mask >>= 1; i++; }
+    return i;
+#endif
+}
+
+/* The caller supplies exactly sixteen readable bytes. ASCII whitespace here
+ * matches ds_space(), including the four information-separator controls. */
+static inline AsciiMasks ds_ascii_masks(const char *p) {
+    AsciiMasks masks;
+#ifdef DS_SSE2
+    __m128i data = _mm_loadu_si128((const __m128i *)p);
+    __m128i upper = _mm_and_si128(_mm_cmpgt_epi8(data, _mm_set1_epi8('A' - 1)),
+                                  _mm_cmpgt_epi8(_mm_set1_epi8('Z' + 1), data));
+    __m128i lower = _mm_and_si128(_mm_cmpgt_epi8(data, _mm_set1_epi8('a' - 1)),
+                                  _mm_cmpgt_epi8(_mm_set1_epi8('z' + 1), data));
+    __m128i digit = _mm_and_si128(_mm_cmpgt_epi8(data, _mm_set1_epi8('0' - 1)),
+                                  _mm_cmpgt_epi8(_mm_set1_epi8('9' + 1), data));
+    __m128i plain = _mm_cmpeq_epi8(data, _mm_set1_epi8(' '));
+    __m128i controls = _mm_or_si128(
+        _mm_and_si128(_mm_cmpgt_epi8(data, _mm_set1_epi8(8)),
+                       _mm_cmpgt_epi8(_mm_set1_epi8(14), data)),
+        _mm_and_si128(_mm_cmpgt_epi8(data, _mm_set1_epi8(27)),
+                       _mm_cmpgt_epi8(_mm_set1_epi8(32), data)));
+    masks.upper = (unsigned)_mm_movemask_epi8(upper);
+    masks.lower = (unsigned)_mm_movemask_epi8(lower);
+    masks.digit = (unsigned)_mm_movemask_epi8(digit);
+    masks.space = (unsigned)_mm_movemask_epi8(_mm_or_si128(plain, controls));
+    masks.plain_space = (unsigned)_mm_movemask_epi8(plain);
+    masks.nonascii = (unsigned)_mm_movemask_epi8(data);
+#elif defined(DS_NEON)
+    uint8x16_t data = vld1q_u8((const uint8_t *)p);
+    uint8x16_t plain = vceqq_u8(data, vdupq_n_u8(' '));
+    uint8x16_t controls = vorrq_u8(
+        vandq_u8(vcgeq_u8(data, vdupq_n_u8(9)), vcleq_u8(data, vdupq_n_u8(13))),
+        vandq_u8(vcgeq_u8(data, vdupq_n_u8(28)), vcleq_u8(data, vdupq_n_u8(31))));
+    masks.upper = ds_neon_mask(ds_neon_upper(data));
+    masks.lower = ds_neon_mask(vandq_u8(vcgeq_u8(data, vdupq_n_u8('a')),
+                                       vcleq_u8(data, vdupq_n_u8('z'))));
+    masks.digit = ds_neon_mask(vandq_u8(vcgeq_u8(data, vdupq_n_u8('0')),
+                                       vcleq_u8(data, vdupq_n_u8('9'))));
+    masks.space = ds_neon_mask(vorrq_u8(plain, controls));
+    masks.plain_space = ds_neon_mask(plain);
+    masks.nonascii = ds_neon_mask(vcgeq_u8(data, vdupq_n_u8(128)));
+#else
+    size_t i;
+    masks = (AsciiMasks){0};
+    for (i = 0; i < 16; i++) {
+        unsigned char c = (unsigned char)p[i];
+        uint64_t bit = UINT64_C(1) << i;
+        if (c >= 'A' && c <= 'Z') masks.upper |= bit;
+        if (c >= 'a' && c <= 'z') masks.lower |= bit;
+        if (c >= '0' && c <= '9') masks.digit |= bit;
+        if (c == ' ' || (c >= 9 && c <= 13) || (c >= 28 && c <= 31)) masks.space |= bit;
+        if (c == ' ') masks.plain_space |= bit;
+        if (c >= 128) masks.nonascii |= bit;
+    }
+#endif
+    return masks;
+}
+
+static inline int ds_ascii_space(unsigned char c) {
+    return c == ' ' || (c >= 9 && c <= 13) || (c >= 28 && c <= 31);
+}
+
+static inline size_t ds_rule_span(const char *p, size_t n) {
+    size_t i = 0;
+    for (; n - i >= 16; i += 16) {
+        AsciiMasks masks = ds_ascii_masks(p + i);
+        uint64_t stop = masks.space | masks.nonascii;
+        if (stop) return i + ds_mask_first(stop);
+    }
+    for (; i < n; i++)
+        if ((unsigned char)p[i] >= 128 || ds_ascii_space((unsigned char)p[i])) break;
+    return i;
+}
+
+/* Table predicates operate on dense fact bytes rather than revisiting strings. */
+static inline int ds_flags_any(const unsigned char *p, size_t n, unsigned char bit) {
+    size_t i = 0;
+    if (n && (p[0] & bit)) return 1;
+#ifdef DS_SSE2
+    __m128i wanted = _mm_set1_epi8((char)bit), zero = _mm_setzero_si128();
+    for (; n - i >= 16; i += 16) {
+        __m128i flags = _mm_and_si128(_mm_loadu_si128((const __m128i *)(p + i)), wanted);
+        if (_mm_movemask_epi8(_mm_cmpeq_epi8(flags, zero)) != 0xffff) return 1;
+    }
+#elif defined(DS_NEON)
+    uint8x16_t wanted = vdupq_n_u8(bit);
+    for (; n - i >= 16; i += 16) {
+        uint8x16_t flags = vandq_u8(vld1q_u8(p + i), wanted);
+        if (ds_neon_mask(vcgtq_u8(flags, vdupq_n_u8(0)))) return 1;
+    }
+#endif
+    for (; i < n; i++) if (p[i] & bit) return 1;
+    return 0;
+}
+
+static inline size_t ds_flags_columns(unsigned char *keep, const unsigned char *p,
+                                     size_t n, unsigned char bit) {
+    size_t i = 0, added = 0;
+#ifdef DS_SSE2
+    __m128i wanted = _mm_set1_epi8((char)bit), zero = _mm_setzero_si128();
+    for (; n - i >= 16; i += 16) {
+        __m128i previous = _mm_loadu_si128((const __m128i *)(keep + i));
+        if (!_mm_movemask_epi8(_mm_cmpeq_epi8(previous, zero))) continue;
+        __m128i flags = _mm_and_si128(_mm_loadu_si128((const __m128i *)(p + i)), wanted);
+        __m128i present = _mm_andnot_si128(_mm_cmpeq_epi8(flags, zero), _mm_set1_epi8(1));
+        __m128i counts = _mm_sad_epu8(_mm_andnot_si128(previous, present), zero);
+        added += (unsigned)_mm_cvtsi128_si32(counts) +
+                 (unsigned)_mm_cvtsi128_si32(_mm_srli_si128(counts, 8));
+        _mm_storeu_si128((__m128i *)(keep + i), _mm_or_si128(previous, present));
+    }
+#elif defined(DS_NEON)
+    uint8x16_t wanted = vdupq_n_u8(bit);
+    for (; n - i >= 16; i += 16) {
+        uint8x16_t previous = vld1q_u8(keep + i);
+        if (vminvq_u8(previous)) continue;
+        uint8x16_t flags = vandq_u8(vld1q_u8(p + i), wanted);
+        uint8x16_t present = vandq_u8(vcgtq_u8(flags, vdupq_n_u8(0)), vdupq_n_u8(1));
+        added += vaddvq_u8(vbicq_u8(present, previous));
+        vst1q_u8(keep + i, vorrq_u8(previous, present));
+    }
+#endif
+    for (; i < n; i++)
+        if (!keep[i] && (p[i] & bit)) { keep[i] = 1; added++; }
+    return added;
+}
+
 /* Plain text/partial SGML scanners. Like the HTML scans, these never read
  * outside the supplied slice; scalar builds use exactly the same predicates. */
 static inline size_t ds_text_line_end(const char *p, size_t n) {

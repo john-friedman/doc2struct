@@ -205,14 +205,25 @@ Str ds_input(Arena *a, Str s) {
     return (Str){p, j};
 }
 int ds_upper(Str s) {
-    size_t i, k;
+    size_t i = 0, k;
     int found = 0;
-    for (i = 0; i < s.n; i += k) {
+    while (i < s.n) {
+        if (s.n - i >= 16) {
+            AsciiMasks masks = ds_ascii_masks(s.p + i);
+            if (masks.lower) return 0;
+            found |= masks.upper != 0;
+            if (!masks.nonascii) {
+                i += 16;
+                continue;
+            }
+            i += ds_mask_first(masks.nonascii);
+        }
         unsigned f = uflags(ds_utf8(s.p + i, s.n - i, &k));
         if (f & 4)
             return 0;
         if (f & 2)
             found = 1;
+        i += k;
     }
     return found;
 }
@@ -285,6 +296,97 @@ Str ds_lower(Arena *a, Str s) {
     p[j] = 0;
     return changed ? (Str){p, j} : s;
 }
+enum { TEXT_ASCII = 1, TEXT_UPPER = 2, TEXT_NORMAL_SPACE = 4 };
+
+/* Summarize the exact logical text. Whitespace runs may cross SIMD blocks. */
+static unsigned rule_facts(Str s) {
+    unsigned facts = TEXT_ASCII | TEXT_NORMAL_SPACE;
+    size_t i = 0;
+    int previous_space = 0;
+    for (; s.n - i >= 16; i += 16) {
+        AsciiMasks masks = ds_ascii_masks(s.p + i);
+        if (masks.nonascii) return 0;
+        if (masks.upper) facts |= TEXT_UPPER;
+        if (masks.space != masks.plain_space ||
+            (masks.plain_space & (masks.plain_space << DS_MASK_STEP)) ||
+            ((!i || previous_space) && (masks.plain_space & 1)))
+            facts &= ~TEXT_NORMAL_SPACE;
+        previous_space = (masks.plain_space & (UINT64_C(1) << (15 * DS_MASK_STEP))) != 0;
+    }
+    for (; i < s.n; i++) {
+        unsigned char c = (unsigned char)s.p[i];
+        if (c >= 128) return 0;
+        if (c >= 'A' && c <= 'Z') facts |= TEXT_UPPER;
+        if (ds_ascii_space(c)) {
+            if (c != ' ' || !i || previous_space) facts &= ~TEXT_NORMAL_SPACE;
+            previous_space = 1;
+        } else previous_space = 0;
+    }
+    if (previous_space) facts &= ~TEXT_NORMAL_SPACE;
+    return facts;
+}
+
+/* Unicode case mappings can depend on the whole line (for example final
+ * sigma), so mixed text keeps the existing full-string lowercase operation. */
+static Str unicode_rule_text(Arena *a, Str source) {
+    char *buffer;
+    size_t i, k, used = 0;
+    int space = 0;
+    source = ds_lower(a, source);
+    if (!source.p) return source;
+    buffer = ds_alloc_uninit(a, source.n + 1);
+    if (!buffer) return (Str){0};
+    for (i = 0; i < source.n; i += k) {
+        uint32_t c = ds_utf8(source.p + i, source.n - i, &k);
+        if (ds_space(c) || c == 0x200b) {
+            space = used != 0;
+            continue;
+        }
+        if (space) buffer[used++] = ' ';
+        memcpy(buffer + used, source.p + i, k);
+        used += k;
+        space = 0;
+    }
+    buffer[used] = 0;
+    return (Str){buffer, used};
+}
+
+Str ds_rule_text(Arena *a, Str source) {
+    unsigned facts;
+    char *buffer;
+    size_t i = 0, used = 0;
+    int space = 0;
+    if (!source.p) return source;
+    facts = rule_facts(source);
+    if (!(facts & TEXT_ASCII)) return unicode_rule_text(a, source);
+    if ((facts & TEXT_NORMAL_SPACE) && !(facts & TEXT_UPPER)) return source;
+    if (source.n == SIZE_MAX) {
+        snprintf(a->error, sizeof(a->error), "text too large");
+        return (Str){0};
+    }
+    buffer = ds_alloc_uninit(a, source.n + 1);
+    if (!buffer) return (Str){0};
+    if (facts & TEXT_NORMAL_SPACE) {
+        ds_ascii_lower(buffer, source.p, source.n);
+        used = source.n;
+    } else while (i < source.n) {
+        size_t run = ds_rule_span(source.p + i, source.n - i);
+        if (run) {
+            if (space) buffer[used++] = ' ';
+            if (facts & TEXT_UPPER) ds_ascii_lower(buffer + used, source.p + i, run);
+            else memcpy(buffer + used, source.p + i, run);
+            used += run;
+            i += run;
+            space = 0;
+        } else {
+            do { i++; } while (i < source.n && ds_ascii_space((unsigned char)source.p[i]));
+            space = used != 0;
+        }
+    }
+    buffer[used] = 0;
+    return (Str){buffer, used};
+}
+
 int ds_stop_word(Str word) {
     size_t j;
     static const char *stops[] = {"and", "or",  "of",   "the", "in", "on", "at",
