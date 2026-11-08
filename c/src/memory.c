@@ -113,7 +113,46 @@ void *ds_push(Arena *a, Vec *v, size_t width) {
     }
     return (char *)v->p + v->n++ * width;
 }
+#if defined(_M_X64)
+#include <intrin.h>
+#include <nmmintrin.h>
+static int crc_available(void) {
+    static volatile long cached = -1;
+    long result = cached;
+    if (result < 0) {
+        int registers[4];
+        __cpuid(registers, 1);
+        result = (registers[2] >> 20) & 1;
+        _InterlockedCompareExchange(&cached, result, -1);
+    }
+    return result != 0;
+}
+static uint64_t crc_string(Str s) {
+    uint64_t a = s.n, b = 0x9e3779b1U, c = 0x85ebca77U, d = 0xc2b2ae3dU;
+    size_t i = 0;
+    for (; s.n - i >= 32; i += 32) {
+        uint64_t words[4];
+        memcpy(words, s.p + i, sizeof(words));
+        a = _mm_crc32_u64(a, words[0]); b = _mm_crc32_u64(b, words[1]);
+        c = _mm_crc32_u64(c, words[2]); d = _mm_crc32_u64(d, words[3]);
+    }
+    for (; s.n - i >= 8; i += 8) {
+        uint64_t word;
+        memcpy(&word, s.p + i, sizeof(word));
+        a = _mm_crc32_u64(a, word);
+    }
+    for (; i < s.n; i++) a = _mm_crc32_u8((unsigned)a, (unsigned char)s.p[i]);
+    uint64_t hash = a ^ (b << 32) ^ ((c << 17) | (c >> 47)) ^ ((d << 43) | (d >> 21));
+    hash ^= hash >> 33; hash *= 0xff51afd7ed558ccdULL;
+    hash ^= hash >> 33; hash *= 0xc4ceb9fe1a85ec53ULL;
+    hash ^= hash >> 33;
+    return hash ? hash : 1; /* Zero marks an unused Map entry. */
+}
+#endif
 static uint64_t hash(Str s) {
+#if defined(_M_X64)
+    if (s.n >= 32 && crc_available()) return crc_string(s);
+#endif
     uint64_t h = 0x9e3779b97f4a7c15ULL ^ (uint64_t)s.n, word;
     size_t i = 0;
     /* Compare complete keys after hashing; process unaligned words without
@@ -176,6 +215,47 @@ int ds_map_put(Arena *a, Map *m, Str k, void *value) {
         m->n++;
     m->entries[i] = (Entry){k, value, h};
     return 1;
+}
+
+void **ds_map_slot(Arena *a, Map *m, Str k) {
+    size_t i;
+    uint64_t h = hash(k);
+    /* Resolve existing keys before considering growth; one hash per key. */
+    if (m->cap) {
+        i = (size_t)h & (m->cap - 1);
+        while (m->entries[i].hash) {
+            if (m->entries[i].hash == h && ds_eq(m->entries[i].key, k))
+                return &m->entries[i].value;
+            i = (i + 1) & (m->cap - 1);
+        }
+    }
+    if (!m->cap || (m->n + 1) * 10 > m->cap * 7) {
+        size_t cap = m->cap ? m->cap * 2 : 32, j;
+        Entry *entries;
+        if (cap < m->cap || cap > SIZE_MAX / sizeof(Entry)) {
+            snprintf(a->error, sizeof(a->error), "map too large");
+            return 0;
+        }
+        entries = ds_alloc(a, cap * sizeof(Entry));
+        if (!entries)
+            return 0;
+        for (j = 0; j < m->cap; j++)
+            if (m->entries[j].hash) {
+                i = (size_t)m->entries[j].hash & (cap - 1);
+                while (entries[i].hash)
+                    i = (i + 1) & (cap - 1);
+                entries[i] = m->entries[j];
+            }
+        m->entries = entries;
+        m->cap = cap;
+    }
+    i = (size_t)h & (m->cap - 1);
+    while (m->entries[i].hash && !ds_eq(m->entries[i].key, k))
+        i = (i + 1) & (m->cap - 1);
+    if (!m->entries[i].hash)
+        m->n++;
+    m->entries[i] = (Entry){k, NULL, h};
+    return &m->entries[i].value;
 }
 Str ds_copy(Arena *a, Str s) {
     char *p = ds_alloc_uninit(a, s.n + 1);

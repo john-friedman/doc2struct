@@ -1,3 +1,4 @@
+#include "tags.h"
 #include "doc2struct.h"
 #include <string.h>
 #include <ctype.h>
@@ -344,20 +345,33 @@ static int send_text(Document *d, TokenSink sink, void *ctx, Str text, int entit
                 return 1;
         }
     }
-    return sink(ctx, TEXT, entity ? ds_unescape(&d->arena, text) : text, NULL);
+    text = entity ? ds_unescape(&d->arena, text) : text;
+    if (d->flow && sink == ds_normalize_token) return ds_html_text(ctx, text);
+    return sink(ctx, TEXT, text, NULL);
 }
 
-enum { TEMPLATE_SLOTS = 1024, TEMPLATE_PREFIX = 512, TEMPLATE_MAX = 4096 };
+enum { TEMPLATE_SLOTS = 4096, TEMPLATE_PREFIX = 512, TEMPLATE_MAX = 4096 };
 typedef struct {
     Str raw, tag;
     Attrs attrs;
     int selfclosed;
+    unsigned props;
 } TagTemplate;
 
 static size_t template_index(const char *text) {
     uint64_t first = 0, middle = 0, last = 0, hash;
     size_t n = TEMPLATE_PREFIX;
-    const char *end = memchr(text, '>', n);
+    const char *end = NULL;
+#ifdef DS_SSE2
+    const __m128i mark = _mm_set1_epi8('>');
+    for (size_t offset = 0; offset < TEMPLATE_PREFIX; offset += 16) {
+        unsigned mask = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(
+            _mm_loadu_si128((const __m128i *)(text + offset)), mark));
+        if (mask) { end = text + offset + ds_first_bit(mask); break; }
+    }
+#else
+    end = memchr(text, '>', n);
+#endif
     /* This is only a fingerprint. A '>' inside a quoted value is harmless:
      * every hit must still match the complete original tag, including quotes. */
     if (end)
@@ -381,207 +395,37 @@ static size_t template_index(const char *text) {
     return (size_t)hash & (TEMPLATE_SLOTS - 1);
 }
 
-int ds_tokenize(Document *d, Str html, TokenSink sink, void *ctx) {
-    size_t i = 0, pos = 0, n = html.n;
-    int text_entity = 0;
-    TagTemplate *templates =
-        d->flow && n >= 65536 ? ds_alloc(&d->arena, TEMPLATE_SLOTS * sizeof(TagTemplate)) : NULL;
-    if (d->arena.error[0])
-        return 0;
-    while (i < n) {
-        size_t start = i, j, k, name_start, name_end, rest_start, end;
-        int closing = 0, selfclosed = 0, parsed_attrs = 0;
-        Str tag;
-        Attrs at;
-        const Attrs *dispatch_attrs = &at;
-        TagTemplate *cached = NULL;
-        if (i == pos)
-            text_entity = 0;
-        if (html.p[i] != '<') {
-            i += text_end(html.p + i, n - i, &text_entity);
-            if (i == n)
-                break;
-            start = i;
+static int send_html_text(Document *d, void *ctx, Str text, int entity) {
+    if (d->flow) {
+        if (d->skip_text)
+            return 1;
+        if (d->skip_blank) {
+            if (ds_blank_text(text.p, text.n))
+                return 1;
+            if (text.n == 6 && !memcmp(text.p, "&#160;", 6))
+                return 1;
         }
-        if (i + 4 <= n && !memcmp(html.p + i, "<!--", 4)) {
-            j = i + 4;
-            while (j + 3 <= n && memcmp(html.p + j, "-->", 3))
-                j++;
-            end = j + 3 <= n ? j + 3 : n;
-            if (start > pos && !send_text(d, sink, ctx, (Str){html.p + pos, start - pos}, text_entity))
-                return 0;
-            pos = i = end;
-            continue;
-        }
-        if (i + 1 < n && (html.p[i + 1] == '!' || html.p[i + 1] == '?')) {
-            j = i + 2;
-            while (j < n && html.p[j] != '>')
-                j++;
-            end = j < n ? j + 1 : n;
-            if (start > pos && !send_text(d, sink, ctx, (Str){html.p + pos, start - pos}, text_entity))
-                return 0;
-            pos = i = end;
-            continue;
-        }
-        j = i + 1;
-        if (j < n && html.p[j] == '/') {
-            closing = 1;
-            j++;
-        }
-        if (j >= n ||
-            !((html.p[j] >= 'a' && html.p[j] <= 'z') || (html.p[j] >= 'A' && html.p[j] <= 'Z'))) {
-            i++;
-            continue;
-        }
-        /* Ordinary lowercase end tags have no attributes or quoted content.
-         * Keep the general path for every other spelling and malformed form. */
-        if (closing) {
-            size_t q = j;
-            while (q < n && html.p[q] >= 'a' && html.p[q] <= 'z')
-                q++;
-            if (q < n && html.p[q] == '>') {
-                if (start > pos && !send_text(d, sink, ctx, (Str){html.p + pos, start - pos}, text_entity))
-                    return 0;
-                if (!sink(ctx, END, (Str){html.p + j, q - j}, NULL))
-                    return 0;
-                pos = i = q + 1;
-                continue;
-            }
-        }
-        name_start = j;
-        if (!closing && templates && n - j >= TEMPLATE_PREFIX) {
-            cached = templates + template_index(html.p + j);
-            if (cached->raw.p && cached->raw.n <= n - j &&
-                tag_equal(html.p + j, cached->raw.p, cached->raw.n)) {
-                tag = cached->tag;
-                dispatch_attrs = &cached->attrs;
-                selfclosed = cached->selfclosed;
-                end = j + cached->raw.n;
-                if (start > pos && !send_text(d, sink, ctx, (Str){html.p + pos, start - pos}, text_entity))
-                    return 0;
-                pos = end;
-                goto dispatch_start;
-            }
-        }
-        j++;
-        while (j < n && html.p[j] != '/' && html.p[j] != '>' && !space_at(html, j, &k))
-            j += k;
-        name_end = j;
-        rest_start = j;
-        if (!closing) {
-            int status = start_attrs(d, html, j, &j, &at);
-            if (status == -2)
-                return 0;
-            if (!status) {
-                i++;
-                continue;
-            }
-            parsed_attrs = status == 1;
-        }
-        while (!parsed_attrs && j < n) {
-            j += ds_tag_mark(html.p + j, n - j);
-            if (j == n)
-                break;
-            char c = html.p[j];
-            if (c == '\'' || c == '\"') {
-                char quote = c;
-                j++;
-                {
-                    const char *close = memchr(html.p + j, quote, n - j);
-                    j = close ? (size_t)(close - html.p) : n;
-                }
-                if (j < n)
-                    j++;
-                else
-                    break;
-            } else if (c == '>')
-                break;
-            else
-                j++;
-        }
-        if (j >= n) {
-            i++;
-            continue;
-        }
-        end = j + 1;
-        if (start > pos && !send_text(d, sink, ctx, (Str){html.p + pos, start - pos}, text_entity))
-            return 0;
-        tag = intern_tag(d, (Str){html.p + name_start, name_end - name_start});
-        if (!tag.p)
-            return 0;
-        pos = end;
-        if (closing) {
-            if (!sink(ctx, END, tag, NULL))
-                return 0;
-            i = end;
-            continue;
-        }
-        {
-            Str rest = {html.p + rest_start, j - rest_start};
-            size_t tail = j;
-            while (tail > rest_start) {
-                unsigned char c = (unsigned char)html.p[tail - 1];
-                if (c >= 128) {
-                    Str trim = ds_strip(rest, 0);
-                    selfclosed = trim.n && trim.p[trim.n - 1] == '/';
-                    break;
-                }
-                if (!(c == ' ' || (c >= 9 && c <= 13) || (c >= 28 && c <= 31))) {
-                    selfclosed = c == '/';
-                    break;
-                }
-                tail--;
-            }
-            if (!parsed_attrs && !attrs(d, rest, &at))
-                return 0;
-        }
-        if (cached && end - name_start <= TEMPLATE_MAX) {
-            if (at.value[A_STYLE].n) {
-                at.prepared_style = ds_style(d, at.value[A_STYLE]);
-                if (!at.prepared_style)
-                    return 0;
-            }
-            cached->raw = (Str){html.p + name_start, end - name_start};
-            cached->tag = tag;
-            cached->attrs = at;
-            cached->selfclosed = selfclosed;
-        }
-    dispatch_start:
-        if (!sink(ctx, START, tag, dispatch_attrs))
-            return 0;
-        if (!selfclosed && (ds_is(tag, "script") || ds_is(tag, "style") || ds_is(tag, "title"))) {
-            size_t q = end;
-            int found = 0;
-            while (q + 2 + tag.n <= n) {
-                if (html.p[q] == '<' && html.p[q + 1] == '/') {
-                    size_t x;
-                    for (x = 0; x < tag.n; x++)
-                        if (tolower((unsigned char)html.p[q + 2 + x]) != (unsigned char)tag.p[x])
-                            break;
-                    if (x == tag.n) {
-                        size_t z = q + 2 + tag.n;
-                        while (z < n && space_at(html, z, &k))
-                            z += k;
-                        if (z < n && html.p[z] == '>') {
-                            pos = z + 1;
-                            found = 1;
-                            break;
-                        }
-                    }
-                }
-                q++;
-            }
-            if (!found)
-                pos = n;
-            if (!sink(ctx, END, tag, NULL))
-                return 0;
-        } else if (selfclosed && !ds_void(tag)) {
-            if (!sink(ctx, END, tag, NULL))
-                return 0;
-        }
-        i = pos;
     }
-    if (pos < n && !send_text(d, sink, ctx, (Str){html.p + pos, n - pos}, text_entity))
-        return 0;
-    return !d->arena.error[0];
+    text = entity ? ds_unescape(&d->arena, text) : text;
+    return ds_html_text(ctx, text);
 }
+
+#define DS_TOKENIZER_STORAGE static
+#define DS_TOKENIZER_NAME ds_html_tokenize
+#define DS_TOKENIZER_DIRECT 1
+#define DS_TOKENIZER_SEND_TEXT(d, sink, ctx, ...) send_html_text(d, ctx, __VA_ARGS__)
+#include "tokenizer_loop.h"
+#undef DS_TOKENIZER_STORAGE
+#undef DS_TOKENIZER_NAME
+#undef DS_TOKENIZER_DIRECT
+#undef DS_TOKENIZER_SEND_TEXT
+
+#define DS_TOKENIZER_STORAGE
+#define DS_TOKENIZER_NAME ds_tokenize
+#define DS_TOKENIZER_DIRECT (d->flow && sink == ds_normalize_token)
+#define DS_TOKENIZER_SEND_TEXT(d, sink, ctx, ...) send_text(d, sink, ctx, __VA_ARGS__)
+#include "tokenizer_loop.h"
+#undef DS_TOKENIZER_STORAGE
+#undef DS_TOKENIZER_NAME
+#undef DS_TOKENIZER_DIRECT
+#undef DS_TOKENIZER_SEND_TEXT

@@ -10,7 +10,7 @@ int ds_parse(Document *document, Str input, const Rules *rules) {
     if (!input.p || !ds_flow_begin(document))
         return 0;
     normalizer = ds_normalizer(document, rules->html);
-    return normalizer && ds_tokenize(document, input, ds_normalize_token, normalizer) &&
+    return normalizer && ds_html_tokenize(document, input, ds_normalize_token, normalizer) &&
            ds_normalize_finish(normalizer) && ds_standardize(document, rules);
 }
 

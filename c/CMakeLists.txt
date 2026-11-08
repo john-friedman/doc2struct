@@ -50,6 +50,7 @@ endif()
 add_library(doc2struct STATIC
     src/preset_data.h
     src/api.c
+    src/html_pipeline.c
     src/pdf.c
     src/pdf_layout.c
     src/config.c
@@ -57,13 +58,9 @@ add_library(doc2struct STATIC
     src/memory.c
     src/text.c
     src/text_layout.c
-    src/tokenizer.c
-    src/normalizer.c
     src/rules.c
-    src/parser.c
     src/standardized_text.c
     src/lists.c
-    src/flow.c
     src/json.c
     src/tables.c
     vendor/pcre2/pcre2_auto_possess.c

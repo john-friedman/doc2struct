@@ -395,6 +395,7 @@ static int clean(Document *d, const Rules *r, Vec *lines) {
     Vec out = {0};
     Line *all = lines->p;
     Str *lower = NULL;
+    size_t **item_counts = NULL;
     size_t *offsets = NULL;
     size_t i, j, k, distinct_labels = 0;
     int dominant = 0;
@@ -413,6 +414,10 @@ static int clean(Document *d, const Rules *r, Vec *lines) {
         if (count > SIZE_MAX / sizeof(Str)) return 0;
         lower = ds_alloc(&d->arena, count * sizeof(Str));
         if (!lower) return 0;
+        if (r->repeat_threshold) {
+            item_counts = ds_alloc(&d->arena, count * sizeof(*item_counts));
+            if (!item_counts) return 0;
+        }
     }
     for (i = 0; r->page_label && i < lines->n; i++) {
         Line *line = all + i;
@@ -436,13 +441,16 @@ static int clean(Document *d, const Rules *r, Vec *lines) {
             size_t *count;
             if (!text.n || image(it) || all[i].listitem)
                 continue;
-            count = ds_map_get(&counts, text);
+            void **slot = ds_map_slot(&d->arena, &counts, text);
+            if (!slot) return 0;
+            count = *slot;
             if (!count) {
                 count = ds_alloc(&d->arena, sizeof(size_t));
-                if (!count || !ds_map_put(&d->arena, &counts, text, count))
-                    return 0;
+                if (!count) return 0;
+                *slot = count;
             }
             (*count)++;
+            item_counts[offsets[i] + j] = count;
         }
     }
     for (i = 0; i < lines->n; i++) {
@@ -472,7 +480,7 @@ static int clean(Document *d, const Rules *r, Vec *lines) {
             int redundant = 0;
             if (!image(&it)) {
                 text = clean_lower(d, &it, lower ? lower + offsets[i] + j : NULL);
-                count = ds_map_get(&counts, text);
+                count = item_counts ? item_counts[offsets[i] + j] : ds_map_get(&counts, text);
                 redundant = page_label || (count && r->repeat_threshold &&
                     (r->repeat_threshold < 0 || *count >= (size_t)r->repeat_threshold));
                 for (k = 0; !redundant && k < r->nremove; k++)

@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.18)
 project(doc2struct LANGUAGES C)
 option(DOC2STRUCT_BUILD_PYTHON "Build the Python extension" OFF)
+option(DOC2STRUCT_ENABLE_IPO "Enable supported Release link-time optimization" ${DOC2STRUCT_BUILD_PYTHON})
+if(DOC2STRUCT_ENABLE_IPO AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION
+   AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT DOC2STRUCT_IPO_SUPPORTED OUTPUT DOC2STRUCT_IPO_ERROR LANGUAGES C)
+    if(DOC2STRUCT_IPO_SUPPORTED)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    else()
+        message(STATUS "Link-time optimization unavailable: ${DOC2STRUCT_IPO_ERROR}")
+    endif()
+endif()
 add_subdirectory(c)
 
 if(DOC2STRUCT_BUILD_PYTHON)

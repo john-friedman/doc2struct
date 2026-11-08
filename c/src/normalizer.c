@@ -102,13 +102,33 @@ static double left_box(Str s) {
     size_t n = words(s, p, 5);
     return n == 4 ? px(p[3]) : n == 2 || n == 3 ? px(p[1]) : px(s);
 }
+static int style_key(Str name) {
+    switch (name.n) {
+    case 4: if (ds_is(name, "font")) return 12; break;
+    case 6: if (ds_is(name, "margin")) return 8; break;
+    case 7:
+        if (ds_is(name, "padding")) return 6;
+        if (ds_is(name, "display")) return 10;
+        break;
+    case 9: if (ds_is(name, "font-size")) return 4; break;
+    case 10:
+        if (ds_is(name, "font-style")) return 1;
+        if (ds_is(name, "text-align")) return 3;
+        if (ds_is(name, "visibility")) return 11;
+        break;
+    case 11:
+        if (ds_is(name, "font-weight")) return 0;
+        if (ds_is(name, "text-indent")) return 5;
+        if (ds_is(name, "margin-left")) return 9;
+        break;
+    case 12: if (ds_is(name, "padding-left")) return 7; break;
+    case 15: if (ds_is(name, "text-decoration")) return 2; break;
+    }
+    return -1;
+}
 Style *ds_style(Document *d, Str raw) {
-    static const char *keys[] = {"font-weight", "font-style",  "text-decoration", "text-align",
-                                 "font-size",   "text-indent", "padding",         "padding-left",
-                                 "margin",      "margin-left", "display",         "visibility",
-                                 "font"};
     Str values[13] = {{0}}, lower;
-    size_t i = 0, j, k;
+    size_t i = 0, k;
     Style *st = ds_map_get(&d->styles, raw);
     if (st)
         return st;
@@ -129,11 +149,8 @@ Style *ds_style(Document *d, Str raw) {
         if (colon != SIZE_MAX) {
             name = ds_strip((Str){lower.p + start, colon - start}, 1);
             value = ds_strip((Str){lower.p + colon + 1, i - colon - 1}, 1);
-            for (j = 0; j < 13; j++)
-                if (ds_is(name, keys[j])) {
-                    values[j] = value;
-                    break;
-                }
+            int index = style_key(name);
+            if (index >= 0) values[index] = value;
         }
         if (i < lower.n)
             i++;
@@ -339,61 +356,74 @@ void *ds_normalizer(Document *d, Options o) {
     }
     return n;
 }
-int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
+static DS_HTML_INLINE int ds_html_text(void *ctx, Str tag) {
     Normalizer *n = ctx;
     Document *d = n->d;
-    Style *st = NULL;
-    Frame *f;
-    int hides;
+    if (d->arena.error[0]) return 0;
+    if (!n->in_body || n->hidden || !tag.n ||
+        (!n->line_open && ds_blank_text(tag.p, tag.n)))
+        return 1;
+    return emit(n, tag, (Str){0}, 0);
+}
+static int end_miss(Normalizer *n, Str tag) {
     size_t i;
     unsigned props;
-    if (d->arena.error[0])
-        return 0;
-    if (kind == TEXT) {
-        if (!n->in_body || n->hidden || !tag.n ||
-            (!n->line_open && ds_blank_text(tag.p, tag.n)))
+    props = ds_tag_flags(tag);
+    unsigned stop;
+    if (!n->in_body || (props & (T_VOID | T_BODY_HTML)))
+        return 1;
+    stop = (props & T_CELL)               ? T_TR | T_TABLE
+           : (props & (T_TR | T_SECTION)) ? T_TABLE
+           : (props & T_TABLE)            ? 0
+                                          : T_TABLE | T_CELL;
+    for (i = 0; i < n->missing_count; i++)
+        if (ds_eq(n->missing_ends[i], tag))
             return 1;
-        return emit(n, tag, (Str){0}, 0);
+    for (i = n->stack.n; i; i--) {
+        Str t = ((Frame *)n->stack.p)[i - 1].tag;
+        if (ds_eq(t, tag)) {
+            while (n->stack.n >= i)
+                if (!pop(n))
+                    return 0;
+            return 1;
+        }
+        if (((Frame *)n->stack.p)[i - 1].props & stop)
+            return 1;
     }
-    if (kind == END && n->stack.n) {
+    /* Only a full-stack miss proves absence. A table barrier may hide a
+     * matching ancestor. Pops preserve absence; every push clears it.
+     * Keep small stacks on the direct path and bound cache lookup cost. */
+    if (n->stack.n >= 128 &&
+        n->missing_count < sizeof(n->missing_ends) / sizeof(*n->missing_ends))
+        n->missing_ends[n->missing_count++] = tag;
+    return 1;
+}
+static DS_HTML_INLINE int ds_html_end(void *ctx, Str tag) {
+    Normalizer *n = ctx;
+    Document *d = n->d;
+    if (d->arena.error[0]) return 0;
+    if (n->stack.n) {
         Frame *top = (Frame *)n->stack.p + n->stack.n - 1;
         if (top->tag.n == tag.n && ds_bytes_equal(top->tag.p, tag.p, tag.n)) {
             if (top->props & T_BODY_HTML)
                 return 1;
+            if (!top->hides && !(top->props & (T_LINE | T_CELL | T_TR | T_TABLE))) {
+                n->stack.n--;
+                return 1;
+            }
             return pop(n);
         }
     }
-    props = ds_tag_flags(tag);
-    if (kind == END) {
-        unsigned stop;
-        if (!n->in_body || (props & (T_VOID | T_BODY_HTML)))
-            return 1;
-        stop = (props & T_CELL)               ? T_TR | T_TABLE
-               : (props & (T_TR | T_SECTION)) ? T_TABLE
-               : (props & T_TABLE)            ? 0
-                                              : T_TABLE | T_CELL;
-        for (i = 0; i < n->missing_count; i++)
-            if (ds_eq(n->missing_ends[i], tag))
-                return 1;
-        for (i = n->stack.n; i; i--) {
-            Str t = ((Frame *)n->stack.p)[i - 1].tag;
-            if (ds_eq(t, tag)) {
-                while (n->stack.n >= i)
-                    if (!pop(n))
-                        return 0;
-                return 1;
-            }
-            if (((Frame *)n->stack.p)[i - 1].props & stop)
-                return 1;
-        }
-        /* Only a full-stack miss proves absence. A table barrier may hide a
-         * matching ancestor. Pops preserve absence; every push clears it.
-         * Keep small stacks on the direct path and bound cache lookup cost. */
-        if (n->stack.n >= 128 &&
-            n->missing_count < sizeof(n->missing_ends) / sizeof(*n->missing_ends))
-            n->missing_ends[n->missing_count++] = tag;
-        return 1;
-    }
+    return end_miss(n, tag);
+}
+static int start_slow(void *ctx, Str tag, const Attrs *a, unsigned props) {
+    Normalizer *n = ctx;
+    Document *d = n->d;
+    if (d->arena.error[0]) return 0;
+    Style *st = NULL;
+    Frame *f;
+    int hides;
+    size_t i;
     if (!n->in_body) {
         if (props & T_HEAD)
             return 1;
@@ -533,6 +563,51 @@ int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
     }
     return !d->arena.error[0];
 }
+static DS_HTML_INLINE int ds_html_start(void *ctx, Str tag, const Attrs *a, unsigned props) {
+    Normalizer *n = ctx;
+    Document *d = n->d;
+    Style *st = NULL;
+    Frame *f;
+    int hides;
+    if (!n->in_body || (props & ~(T_BOLD | T_ITALIC | T_UNDER | T_A)))
+        return start_slow(ctx, tag, a, props);
+    if (d->arena.error[0]) return 0;
+    if (a->value[A_STYLE].n) {
+        st = a->prepared_style ? a->prepared_style : ds_style(d, a->value[A_STYLE]);
+        if (!st)
+            return 0;
+    }
+    hides = (st && (st->display_none || (n->options.hide_visibility && st->vis_hidden))) ||
+            (n->options.hide_hidden_attr && a->value[A_HIDDEN].p);
+
+    if (n->stack.n < n->stack.cap) f = (Frame *)n->stack.p + n->stack.n++;
+    else f = ds_push(&d->arena, &n->stack, sizeof(Frame));
+    if (!f) return 0;
+    *f = n->stack.n > 1 ? ((Frame *)n->stack.p)[n->stack.n - 2] : (Frame){0};
+    f->suppressed = f->hides = f->act = f->root = 0;
+    f->tag = tag; f->props = props; f->open_props |= props;
+    n->missing_count = 0;
+    if (n->hidden) { f->suppressed = 1; return 1; }
+    if (hides) {
+        f->suppressed = f->hides = 1; n->hidden++; d->skip_text = 1; return 1;
+    }
+    if (st) {
+        f->flags = (f->flags & ~st->clear_flags) | st->flags;
+        if (st->has_font) { f->font = st->font; f->has_font = 1; }
+        if (st->has_indent) { f->indent = st->indent; f->has_indent = 1; }
+    }
+    if (props & T_BOLD) f->flags |= BOLD;
+    else if (props & T_ITALIC) f->flags |= ITALIC;
+    else if (props & T_UNDER) f->flags |= UNDERLINE;
+    else if (props & T_A) f->href = a->value[A_HREF].p ? a->value[A_HREF] : ds_str("");
+    return 1;
+}
+int ds_normalize_token(void *ctx, int kind, Str tag, const Attrs *a) {
+    if (kind == TEXT) return ds_html_text(ctx, tag);
+    if (kind == END) return ds_html_end(ctx, tag);
+    return ds_html_start(ctx, tag, a, ds_tag_flags(tag));
+}
+
 int ds_normalize_finish(void *ctx) {
     Normalizer *n = ctx;
     while (n->stack.n)

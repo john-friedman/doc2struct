@@ -191,6 +191,7 @@ void ds_arena_free(Arena *);
 void ds_pool_clear(ArenaPool *);
 void *ds_push(Arena *, Vec *, size_t);
 void *ds_map_get(Map *, Str);
+void **ds_map_slot(Arena *, Map *, Str);
 int ds_map_put(Arena *, Map *, Str, void *);
 Str ds_copy(Arena *, Str);
 Str ds_cat(Arena *, Str, Str);
