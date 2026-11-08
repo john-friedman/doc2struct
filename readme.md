@@ -463,6 +463,8 @@ It should be fairly easy to add new adapters for different modalities. OCR -> in
 
 ## Benchmarks
 
+> Note: since this benchmark was first run, performance has been increased by ~50% on x86.
+
 | data | type | size | time | throughput |
 |---|---|---|---|---|
 | Every 2025 10-K and 10-K/A | html | 19,085.105 MB | 39,962 ms | 477.6 MB/s |
