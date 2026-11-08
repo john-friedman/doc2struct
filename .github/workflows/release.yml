@@ -48,7 +48,7 @@ jobs:
           - runner: windows-2022
             runtime: win_amd64
             args: ""
-          - runner: macos-14
+          - runner: macos-15
             runtime: macos_arm64
             args: ""
           - runner: macos-15-intel
@@ -99,7 +99,7 @@ jobs:
           - runner: windows-2022
             runtime: win_amd64
             arch: AMD64
-          - runner: macos-14
+          - runner: macos-15
             runtime: macos_arm64
             arch: arm64
           - runner: macos-15-intel
@@ -139,7 +139,7 @@ jobs:
           - runner: windows-2022
             runtime: win_amd64
             platform: win_amd64
-          - runner: macos-14
+          - runner: macos-15
             runtime: macos_arm64
             platform: macos_arm64
           - runner: macos-15-intel
