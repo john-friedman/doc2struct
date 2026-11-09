@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define DOC2STRUCT_VERSION "0.1.3"
+#define DOC2STRUCT_VERSION "0.1.4"
 #define DOC2STRUCT_DEFAULT_CACHE_SIZE ((size_t)8 * 1024 * 1024)
 typedef struct doc2struct_rules doc2struct_rules;
 typedef struct doc2struct_parser doc2struct_parser;
@@ -153,6 +153,18 @@ const doc2struct_row *doc2struct_document_rows(const doc2struct_document *, size
  * with_rules is retained for compatibility; columns always govern the schema. */
 char *doc2struct_document_json(doc2struct_document *, const doc2struct_rules *, int with_rules,
                               size_t *size, doc2struct_error *error);
+/* Render rows in their supplied document order. Pipe tables use an empty
+ * header and retain every source row. Layout whitespace is collapsed; source
+ * Markdown is escaped. The generated opening introduction title is suppressed.
+ * Heading depths above six become bold paragraphs. Images retain their alt text
+ * as placeholders. Table captions matching the current heading are not repeated.
+ * Returns a NUL-terminated UTF-8 buffer (including for empty input); free with
+ * doc2struct_buffer_free. output_size excludes the terminating NUL.
+ * BLOCKQUOTE is the default presentation; PLAIN retains unmarked text and OMIT
+ * drops only redundant rows. Input rows and all their fields are borrowed. */
+enum { DOC2STRUCT_REDUNDANT_BLOCKQUOTE, DOC2STRUCT_REDUNDANT_PLAIN, DOC2STRUCT_REDUNDANT_OMIT };
+char *doc2struct_convert_standardized_text_to_markdown(const doc2struct_row *rows, size_t count,
+        int redundant, size_t *output_size, doc2struct_error *error);
 void doc2struct_buffer_free(void *);
 
 /* Staged parsing API used by adapters and native diagnostic tools. */

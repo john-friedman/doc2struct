@@ -718,6 +718,157 @@ error:
     Py_DECREF(list);
     return NULL;
 }
+/* Import only rendering fields. Metadata/custom columns stay with the caller.
+ * Text is copied into a document arena before releasing the GIL. */
+static void markdown_rows_free(Row *rows, size_t count) {
+    size_t i;
+    for (i = 0; i < count; i++) {
+        PyMem_Free(rows[i].matrix.cells);
+        PyMem_Free(rows[i].notes);
+    }
+    PyMem_Free(rows);
+}
+static int markdown_matrix(Document *d, PyObject *value, Matrix *m, int is_list) {
+    PyObject *outer = NULL, *row = NULL, *materialized = NULL;
+    Py_ssize_t i, j, count, width = 0;
+    if (!value || value == Py_None) return 1;
+    if (PyUnicode_Check(value) || PyBytes_Check(value)) goto invalid;
+    outer = PySequence_Fast(value, "matrix must be a sequence of rows");
+    if (!outer) return 0;
+    count = PySequence_Fast_GET_SIZE(outer);
+    materialized = PyList_New(count);
+    if (!materialized) goto error;
+    /* Materialize each row once, then pad ragged tables with empty cells. */
+    for (i = 0; i < count; i++) {
+        PyObject *v = PySequence_Fast_GET_ITEM(outer, i);
+        if (PyUnicode_Check(v) || PyBytes_Check(v)) goto invalid;
+        row = PySequence_Fast(v, "matrix row must be a sequence");
+        if (!row) goto error;
+        j = PySequence_Fast_GET_SIZE(row);
+        if (is_list && j != 2) goto invalid;
+        if (j > width) width = j;
+        PyList_SET_ITEM(materialized, i, row);
+        row = NULL;
+    }
+    Py_SETREF(outer, materialized);
+    materialized = NULL;
+    m->nr = (size_t)count;
+    m->nc = (size_t)width;
+    if (width && (size_t)count > SIZE_MAX / sizeof(Str) / (size_t)width) {
+        PyErr_NoMemory(); goto error;
+    }
+    if (count && width) {
+        m->cells = PyMem_Calloc((size_t)count * (size_t)width, sizeof(Str));
+        if (!m->cells) { PyErr_NoMemory(); goto error; }
+    }
+    for (i = 0; i < count; i++) {
+        row = PySequence_Fast(PySequence_Fast_GET_ITEM(outer, i), "matrix row must be a sequence");
+        if (!row) goto error;
+        for (j = 0; j < PySequence_Fast_GET_SIZE(row); j++) {
+            m->cells[(size_t)i * m->nc + (size_t)j] = string(d, PySequence_Fast_GET_ITEM(row, j));
+            if (PyErr_Occurred()) goto error;
+        }
+        Py_CLEAR(row);
+    }
+    Py_DECREF(outer);
+    return !native_error(doc2struct_document_error(d));
+invalid:
+    PyErr_SetString(PyExc_ValueError, is_list ? "list matrix rows must contain depth and text" : "matrix must contain cell sequences");
+error:
+    Py_XDECREF(materialized);
+    Py_XDECREF(row);
+    Py_XDECREF(outer);
+    return 0;
+}
+static int markdown_notes(Document *d, PyObject *value, Row *r) {
+    PyObject *seq, *pair = NULL;
+    Py_ssize_t i, n;
+    if (!value || value == Py_None) return 1;
+    seq = PySequence_Fast(value, "footnotes must be a sequence of pairs");
+    if (!seq) return 0;
+    n = PySequence_Fast_GET_SIZE(seq);
+    r->nnotes = (size_t)n;
+    if ((size_t)n > SIZE_MAX / sizeof(*r->notes)) { PyErr_NoMemory(); goto error; }
+    if (n) {
+        r->notes = PyMem_Calloc((size_t)n, sizeof(*r->notes));
+        if (!r->notes) { PyErr_NoMemory(); goto error; }
+    }
+    for (i = 0; i < n; i++) {
+        PyObject *v = PySequence_Fast_GET_ITEM(seq, i);
+        if (PyUnicode_Check(v) || PyBytes_Check(v)) {
+            PyErr_SetString(PyExc_ValueError, "footnotes must contain [id, text] pairs"); goto error;
+        }
+        pair = PySequence_Fast(v, "footnote must be a pair");
+        if (!pair) goto error;
+        if (PySequence_Fast_GET_SIZE(pair) != 2) {
+            PyErr_SetString(PyExc_ValueError, "footnote must contain id and text"); goto error;
+        }
+        r->notes[i].id = string(d, PySequence_Fast_GET_ITEM(pair, 0));
+        r->notes[i].text = string(d, PySequence_Fast_GET_ITEM(pair, 1));
+        if (PyErr_Occurred()) goto error;
+        Py_CLEAR(pair);
+    }
+    Py_DECREF(seq);
+    return !native_error(doc2struct_document_error(d));
+error:
+    Py_XDECREF(pair);
+    Py_DECREF(seq);
+    return 0;
+}
+static PyObject *markdown(PyObject *self, PyObject *args) {
+    PyObject *input_rows, *seq = NULL, *result = NULL;
+    const char *mode = "blockquote";
+    int redundant;
+    Row *rows = NULL;
+    Document *d = NULL;
+    Py_ssize_t i, count = 0;
+    char *output = NULL;
+    size_t size = 0;
+    doc2struct_error error = {{0}};
+    if (!PyArg_ParseTuple(args, "O|s:markdown", &input_rows, &mode)) return NULL;
+    if (!strcmp(mode, "blockquote")) redundant = DOC2STRUCT_REDUNDANT_BLOCKQUOTE;
+    else if (!strcmp(mode, "plain")) redundant = DOC2STRUCT_REDUNDANT_PLAIN;
+    else if (!strcmp(mode, "omit")) redundant = DOC2STRUCT_REDUNDANT_OMIT;
+    else { PyErr_SetString(PyExc_ValueError, "redundant must be 'blockquote', 'plain', or 'omit'"); return NULL; }
+    seq = PySequence_Fast(input_rows, "standardized_text must be an iterable of dictionaries");
+    if (!seq || !(d = new_document())) goto done;
+    count = PySequence_Fast_GET_SIZE(seq);
+    if ((size_t)count > SIZE_MAX / sizeof(Row)) { PyErr_NoMemory(); goto done; }
+    rows = PyMem_Calloc(count ? (size_t)count : 1, sizeof(Row));
+    if (!rows) { PyErr_NoMemory(); goto done; }
+    for (i = 0; i < count; i++) {
+        Row *r = rows + i;
+        PyObject *o = PySequence_Fast_GET_ITEM(seq, i), *v;
+        if (!PyDict_Check(o)) { PyErr_SetString(PyExc_TypeError, "standardized rows must be dictionaries"); goto done; }
+        v = PyDict_GetItemString(o, "type");
+        if (!v || !PyUnicode_Check(v)) { PyErr_SetString(PyExc_TypeError, "row type must be a string"); goto done; }
+        r->type = string(d, v);
+        v = PyDict_GetItemString(o, "level");
+        r->level = v ? PyLong_AsSize_t(v) : 0;
+        v = PyDict_GetItemString(o, "id");
+        r->id = v ? PyLong_AsSize_t(v) : (size_t)i;
+        r->text = string(d, PyDict_GetItemString(o, "text"));
+        r->preamble = string(d, PyDict_GetItemString(o, "preamble"));
+        r->postamble = string(d, PyDict_GetItemString(o, "postamble"));
+        if (PyErr_Occurred()) goto done;
+        if ((str_is(r->type, "table") || str_is(r->type, "list")) &&
+            (!markdown_matrix(d, PyDict_GetItemString(o, "matrix"), &r->matrix, str_is(r->type, "list")) ||
+             !markdown_notes(d, PyDict_GetItemString(o, "footnotes"), r))) goto done;
+    }
+    if (native_error(doc2struct_document_error(d))) goto done;
+    Py_BEGIN_ALLOW_THREADS
+    output = doc2struct_convert_standardized_text_to_markdown(rows, (size_t)count, redundant, &size, &error);
+    Py_END_ALLOW_THREADS
+    if (output) result = unicode((Str){output, size});
+    else native_error(error.message);
+done:
+    doc2struct_buffer_free(output);
+    if (rows) markdown_rows_free(rows, (size_t)count);
+    doc2struct_document_free(d);
+    Py_XDECREF(seq);
+    return result;
+}
+
 static PyObject *standardize(PyObject *self, PyObject *args) {
     PyObject *instructions, *capsule, *result = NULL;
     Document *d = NULL;
@@ -1160,6 +1311,7 @@ static PyObject *parse_text(PyObject *self, PyObject *args) { return text_impl(s
 static PyObject *parse_partialsgml(PyObject *self, PyObject *args) { return text_impl(self, args, 1, 0); }
 
 static PyMethodDef methods[] = {
+    {"markdown", markdown, METH_VARARGS, "Render standardized Python rows as Markdown in C."},
     {"parse_text", parse_text, METH_VARARGS, "Parse plain text through native layout and standardization."},
     {"parse_partialsgml", parse_partialsgml, METH_VARARGS, "Parse partial SGML through native layout and standardization."},
     {"text_instructions", text_instructions, METH_VARARGS, "Convert plain text to native instructions."},

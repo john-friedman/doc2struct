@@ -143,6 +143,9 @@ standardized_text = parse_html(html, rules="SEC:10-K")
 pl.from_dicts(
     standardized_text, infer_schema_length=None
 ).write_parquet("document.parquet")
+
+# writing output to markdown
+convert_standardized_text_to_markdown(standardized_text, redundant="blockquote")
 ```
 
 

@@ -62,6 +62,7 @@ add_library(doc2struct STATIC
     src/standardized_text.c
     src/lists.c
     src/json.c
+    src/markdown.c
     src/tables.c
     vendor/pcre2/pcre2_auto_possess.c
     vendor/pcre2/pcre2_chkdint.c
