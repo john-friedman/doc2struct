@@ -294,6 +294,46 @@ Partial SGML is naively assumed to be in order.
 
 Same as for HTML.
 
+### Bounding Boxes
+
+Experimental. Pass bounding boxes (from OCR) into doc2struct.
+
+
+```python
+import doc2struct
+
+# User chooses and runs their own OCR system.
+ocr_result = run_your_ocr("scanned_document.pdf")
+
+# Translate its output into doc2struct's expected format.
+pages = [
+    {
+        "width": 2550,
+        "height": 3300,
+        # Coordinate system:
+        # pixels, top-left origin, [left, top, right, bottom].
+        "words": [
+            {
+                "text": "Revenue",
+                "bbox": [240, 600, 430, 645],
+            },
+            {
+                "text": "2025",
+                "bbox": [1500, 600, 1600, 645],
+            },
+            {
+                "text": "100",
+                "bbox": [1500, 680, 1580, 725],
+            },
+        ],
+    },
+    # Additional pages, in document order.
+]
+
+# OCR -> instructions -> standardized_text
+rows = doc2struct.parse_bb(pages, rules="SEC:10-K")
+```
+
 ### Instruction definition
 
 | Term | Meaning |

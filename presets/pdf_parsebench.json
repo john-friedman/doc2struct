@@ -1,0 +1,46 @@
+{
+  "namespace": "PDF",
+  "rule_sets": {
+    "pdf_parsebench": {
+      "name": "pdf_parsebench",
+      "adapters": {
+        "pdf": {
+          "clip_to_page": true,
+          "detect_decorations": true,
+          "layout": "regions",
+          "font_recovery": "glyphs"
+        }
+      },
+      "text": {
+        "preserve_styles": ["bold", "italic", "underline", "strikethrough"],
+        "join_wrapped_lines": true,
+        "wrap_hyphenation": "preserve"
+      },
+      "headings": {
+        "infer": true,
+        "styles": ["bold", "all_caps"],
+        "max_words": 30,
+        "merge_adjacent": false
+      },
+      "tables": {
+        "steps": [
+          "validate_structure",
+          "remove_empty_rows",
+          "remove_subset_rows_bottom_to_top",
+          "remove_subset_columns_left_to_right",
+          "remove_subset_columns_right_to_left"
+        ],
+        "single_row_to_text": false,
+        "title_from_section": false,
+        "footnote_lines": 0,
+        "preamble_lines": 0,
+        "postamble_lines": 0,
+        "protect_years": true,
+        "formatting_max_gap": 8
+      }
+    }
+  },
+  "document_types": {
+    "PARSEBENCH": "pdf_parsebench"
+  }
+}

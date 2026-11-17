@@ -14,9 +14,9 @@ const char *ds_table_steps[] = {"validate_structure",
                                 NULL};
 unsigned ds_style_bit(Str s) {
     static const char *names[] = {"bold",     "italic",      "underline", "centered",
-                                  "all_caps", "proper_case", "fake_table"};
+                                  "all_caps", "proper_case", "fake_table", "strikethrough"};
     unsigned i;
-    for (i = 0; i < 7; i++)
+    for (i = 0; i < 8; i++)
         if (ds_is(s, names[i]))
             return 1u << i;
     return 0;

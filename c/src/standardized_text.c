@@ -33,6 +33,7 @@ typedef struct {
     size_t row, col, rs, cs, index;
     unsigned flags;
     Vec *hrefs;
+    doc2struct_cell_style style;
 } Cell;
 static int compare_ref(const void *a, const void *b) {
     const Ref *x = a, *y = b;
@@ -115,6 +116,7 @@ static int table_line(Document *d, Run *runs, size_t n, Line *out) {
     Ref *refs = NULL;
     Cell *cells, **grid;
     size_t ncells = 0, i, j, k, maxr = 0, maxc = 0, meaningful = 0, lastrow = 0;
+    for (i=0;i<n;i++) if (runs[i].logical_cell) out->logical_cells=1;
     for (i = 1; i < n; i++) {
         Run *a = runs + i - 1, *b = runs + i;
         if (a->row > b->row ||
@@ -175,6 +177,13 @@ static int table_line(Document *d, Run *runs, size_t n, Line *out) {
         c->text = cell_text(d, runs, refs, i, j);
         if (!c->text.p)
             return 0;
+        if (d->preserve_styles) {
+            size_t s;
+            doc2struct_text_run *source=ds_alloc_uninit(&d->arena,(j-i)*sizeof(*source));
+            if (!source) return 0;
+            for (s=i;s<j;s++) { Run *r=cell_run(runs,refs,s);source[s-i]=(doc2struct_text_run){r->text,r->flags}; }
+            if (!ds_style_align(d,c->text,source,j-i,&c->style)) return 0;
+        }
         if (c->row > SIZE_MAX - c->rs || c->col > SIZE_MAX - c->cs)
             goto large;
         if (c->row + c->rs > maxr)
@@ -243,7 +252,7 @@ static int table_line(Document *d, Run *runs, size_t n, Line *out) {
             lastrow = i;
         }
     }
-    if (meaningful == 1) {
+    if (meaningful == 1 && !d->keep_single_row_tables) {
         size_t count = 0;
         Item *items;
         for (j = 0; j < maxc; j++)
@@ -283,6 +292,11 @@ static int table_line(Document *d, Run *runs, size_t n, Line *out) {
         for (i = 0; i < maxr * maxc; i++)
             texts[i] = grid[i] ? grid[i]->text : ds_str("");
         out->matrix = (Matrix){texts, maxr, maxc};
+        if (d->preserve_styles) {
+            out->matrix.styles=ds_alloc(&d->arena,maxr*maxc*sizeof(*out->matrix.styles));
+            if (!out->matrix.styles) return 0;
+            for (i=0;i<maxr*maxc;i++) if (grid[i]) out->matrix.styles[i]=grid[i]->style;
+        }
     }
     return !d->arena.error[0];
 large:
@@ -1127,6 +1141,7 @@ static int build(Document *d, Vec *lines) {
             if (!r)
                 return 0;
             r->matrix = ln->matrix;
+            r->logical_cells=ln->logical_cells;
             continue;
         }
         if (ln->level >= 0) {
@@ -1234,46 +1249,66 @@ static size_t style_space(Str s,size_t p) {
     if(c<128)return c==' '||c=='\n'||c=='\r'||c=='\t'||c=='\f'||c=='\v';
     return ds_space(ds_utf8(s.p+p,s.n-p,&k))?k:0;
 }
-/* Align source items to the final plain text in one forward scan. No search,
+/* Align source runs to the final plain text in one forward scan. No search,
  * markup injection, or copies of character buffers. Fall back to plain text
  * if a structural transformation no longer matches its retained items. */
-static int text_runs(Document *d,const Rules *rules) {
-    Row *rows=d->rows.p;size_t i,j,k;
-    if(!rules->preserve_styles)return 1;
-    for(i=0;i<d->rows.n;i++) {
-        Row *row=rows+i;size_t pos=0,start=0,n=0;unsigned flags=0,any=0;
+int ds_style_align(Document *d,Str text,const doc2struct_text_run *source_runs,size_t count,doc2struct_cell_style *out) {
+        size_t pos=0,start=0,n=0,j,k;unsigned flags=0,any=0;
         doc2struct_text_run *runs;int mismatch=0;
-        if(row->matrix.nr||ds_is(row->type,"image"))continue;
-        row->style_mask=rules->preserve_styles;
-        for(j=0;j<row->nitems;j++)any|=row->items[j].run.flags;
-        if(!(any&rules->preserve_styles)||!row->text.n)continue;
-        if(row->nitems>SIZE_MAX/sizeof(*runs)-1)return 0;
-        runs=ds_alloc(&d->arena,(row->nitems+1)*sizeof(*runs));if(!runs)return 0;
-        for(j=0;j<row->nitems&&!mismatch;j++) {
-            Str source=row->items[j].run.text;unsigned next=row->items[j].run.flags&rules->preserve_styles;
+        *out=(doc2struct_cell_style){0};
+        for(j=0;j<count;j++)any|=source_runs[j].flags;
+        if(!(any&d->preserve_styles)||!text.n)return 1;
+        if(count>SIZE_MAX/sizeof(*runs)-1)return 0;
+        runs=ds_alloc(&d->arena,(count+1)*sizeof(*runs));if(!runs)return 0;
+        for(j=0;j<count&&!mismatch;j++) {
+            Str source=source_runs[j].text;unsigned next=source_runs[j].flags&d->preserve_styles;
             int seen=0;
             for(k=0;k<source.n;) {
                 size_t ws=style_space(source,k);
                 if(ws){k+=ws;continue;}
-                while(pos<row->text.n&&(ws=style_space(row->text,pos)))pos+=ws;
-                if(pos>=row->text.n||source.p[k]!=row->text.p[pos]){mismatch=1;break;}
+                while(pos<text.n&&(ws=style_space(text,pos)))pos+=ws;
+                if(pos>=text.n||source.p[k]!=text.p[pos]){mismatch=1;break;}
                 if(!seen&&next!=flags) {
-                    if(pos>start)runs[n++]=(doc2struct_text_run){{row->text.p+start,pos-start},flags};
+                    if(pos>start)runs[n++]=(doc2struct_text_run){{text.p+start,pos-start},flags};
                     start=pos;flags=next;
                 }
                 seen=1;pos++;k++;
             }
         }
-        while(pos<row->text.n&&style_space(row->text,pos))pos+=style_space(row->text,pos);
-        if(mismatch||pos!=row->text.n)continue;
-        if(pos>start)runs[n++]=(doc2struct_text_run){{row->text.p+start,pos-start},flags};
-        row->text_runs=runs;row->ntext_runs=n;
+        while(pos<text.n&&style_space(text,pos))pos+=style_space(text,pos);
+        if(mismatch||pos!=text.n)return 1;
+        if(pos>start)runs[n++]=(doc2struct_text_run){{text.p+start,pos-start},flags};
+        out->runs=runs;out->count=n;
+        return 1;
+}
+static int text_runs(Document *d,const Rules *rules) {
+    Row *rows=d->rows.p;size_t i,j;
+    if(!rules->preserve_styles)return 1;
+    for(i=0;i<d->rows.n;i++) {
+        Row *row=rows+i;
+        doc2struct_cell_style style;
+        doc2struct_text_run *source;
+        if (ds_is(row->type,"image"))continue;
+        row->style_mask=rules->preserve_styles;
+        if (row->matrix.nr) {
+            for(j=0;row->matrix.styles && j<row->matrix.nr*row->matrix.nc;j++) {
+                doc2struct_cell_style *cell=row->matrix.styles+j;
+                if(cell->count && !ds_style_align(d,row->matrix.cells[j],cell->runs,cell->count,cell))return 0;
+            }
+            continue;
+        }
+        if(row->nitems>SIZE_MAX/sizeof(*source))return 0;
+        source=ds_alloc_uninit(&d->arena,row->nitems*sizeof(*source));if(!source&&row->nitems)return 0;
+        for(j=0;j<row->nitems;j++) source[j]=(doc2struct_text_run){row->items[j].run.text,row->items[j].run.flags};
+        if(!ds_style_align(d,row->text,source,row->nitems,&style))return 0;
+        row->text_runs=style.runs;row->ntext_runs=style.count;
     }
     return !d->arena.error[0];
 }
 int ds_standardize(Document *d, const Rules *r) {
     Vec lines = d->flow ? d->lines : (Vec){0};
     d->retain_table_cells = r->unwrap_layout;
+    d->keep_single_row_tables = !r->single_row_to_text;
     d->collect_hrefs = r->collect_hrefs;
     d->preserve_styles = r->preserve_styles;
     d->join_wrapped_lines = r->join_wrapped_lines;

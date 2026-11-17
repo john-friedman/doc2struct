@@ -9,7 +9,9 @@ def convert_standardized_text_to_markdown(standardized_text, *, redundant='block
     ``redundant`` is 'blockquote' (default), 'plain', or 'omit'. Tables always use
     pipes, an empty header, and every source row; ragged rows are padded. Cell and
     paragraph layout whitespace is collapsed to spaces, and literal Markdown is
-    escaped. Optional runs preserve bold/italic/underline using inline HTML.
+    escaped. Optional runs preserve bold/italic/underline/strikethrough using
+    inline HTML. Tables retain plain matrix strings; optional cell_runs entries
+    contain zero-based row/col coordinates and their styled runs.
     Table notes retain their original markers. List matrices contain
     [relative_depth, item_text] string pairs; unsupported legal markers remain
     literal inside bullets. Images become alt-text placeholders. The generated

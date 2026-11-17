@@ -53,6 +53,8 @@ add_library(doc2struct STATIC
     src/html_pipeline.c
     src/pdf.c
     src/pdf_layout.c
+    src/pdf_adapter_experimental.c
+    src/bb.c
     src/config.c
     src/config_json.c
     src/memory.c

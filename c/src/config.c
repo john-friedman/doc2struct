@@ -104,8 +104,8 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
     static const char *const sources[]={"text","header_title","href","src","font_size","indent","flags",NULL};
     static const char *const dtypes[]={"str","int","bool","list",NULL};
     static const char *const which[]={"first","last","all",NULL};
-    static const char *const reserved[]={"id","level","type","text","matrix","cleaned","preamble","footnotes","postamble","runs",NULL};
-    static const char *const adapters[]={"html","text","partialsgml",NULL};
+    static const char *const reserved[]={"id","level","type","text","matrix","cleaned","preamble","footnotes","postamble","runs","cell_runs",NULL};
+    static const char *const adapters[]={"html","text","partialsgml","pdf",NULL};
     static const char *const html_fields[]={"hide_hidden_attr","hide_visibility","max_span",NULL};
     Rules *r=calloc(1,sizeof(*r));JValue *v,*c,*sub,*x,*adapter;size_t i,j;long n;
     if(!r){if(error)snprintf(error->message,sizeof(error->message),"out of memory");return NULL;}
@@ -135,6 +135,24 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
         n=number(r,field(&r->arena,adapter,"tab_size",J_NUMBER,0));
         if(n<1||n>256){bad(&r->arena,"adapter tab_size must be between 1 and 256");goto fail;}
         if(i==1)r->text_tab_size=(size_t)n;else r->partialsgml_tab_size=(size_t)n;
+    }
+    adapter=field(&r->arena,sub,"pdf",J_OBJECT,1);
+    if(adapter) {
+        static const char *const pdf_fields[]={"clip_to_page","detect_decorations","layout","font_recovery",NULL};
+        for(c=adapter->child;c;c=c->next)
+            if(!one_of(c->key,pdf_fields)){bad(&r->arena,"unknown PDF adapter setting");goto fail;}
+        x=field(&r->arena,adapter,"clip_to_page",J_BOOL,1);if(x)r->pdf.clip_to_page=x->boolean;
+        x=field(&r->arena,adapter,"detect_decorations",J_BOOL,1);if(x)r->pdf.detect_decorations=x->boolean;
+        x=field(&r->arena,adapter,"layout",J_STRING,1);
+        if(x) {
+            if(!ds_is(x->text,"default")&&!ds_is(x->text,"regions")){bad(&r->arena,"PDF layout must be default or regions");goto fail;}
+            r->pdf.region_layout=ds_is(x->text,"regions");
+        }
+        x=field(&r->arena,adapter,"font_recovery",J_STRING,1);
+        if(x) {
+            if(!ds_is(x->text,"default")&&!ds_is(x->text,"metadata")&&!ds_is(x->text,"glyphs")){bad(&r->arena,"PDF font_recovery must be default, metadata or glyphs");goto fail;}
+            r->pdf.font_recovery=ds_is(x->text,"metadata")?1:ds_is(x->text,"glyphs")?2:0;
+        }
     }
     if(r->arena.error[0])goto fail;
     v=field(&r->arena,root,"header_styles",J_ARRAY,0);if(!v)goto fail;
@@ -168,7 +186,7 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
     v=field(&r->arena,sub,"preserve_styles",J_ARRAY,0);if(!v)goto fail;
     for(c=v->child;c;c=c->next) {
         unsigned bit=ds_style_bit(text(r,c));
-        if(!bit||(bit&~7u)){bad(&r->arena,"preserve_styles accepts bold, italic and underline");goto fail;}
+        if(!bit||(bit&~(unsigned)TEXT_STYLES)){bad(&r->arena,"preserve_styles accepts bold, italic, underline and strikethrough");goto fail;}
         r->preserve_styles|=bit;
     }
     x=field(&r->arena,sub,"join_wrapped_lines",J_BOOL,0);if(!x)goto fail;r->join_wrapped_lines=x->boolean;

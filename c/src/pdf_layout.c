@@ -5,11 +5,7 @@
 #include <string.h>
 
 typedef doc2struct_pdf_glyph Glyph;
-typedef struct {
-    size_t first, end;
-    double left, right, y, font;
-    int horizontal;
-} Fragment;
+typedef PdfFragment Fragment;
 typedef struct { size_t first, end; double y, font; } PdfRow;
 
 static int by_y(const void *a, const void *b) {
@@ -48,8 +44,8 @@ static size_t utf8(char *out, uint32_t cp) {
 
 /* A fragment owns a contiguous slice of the page's glyph array. No per-character
  * allocations: text is encoded once, directly into the result arena. */
-static int emit(PdfLayout *layout, const doc2struct_pdf_page *page, Fragment f,
-                int table, size_t row, size_t col, int leading_space) {
+int ds_pdf_emit(PdfLayout *layout, const doc2struct_pdf_page *page, PdfFragment f,
+                int table, size_t row, size_t col, size_t rowspan, size_t colspan, int leading_space) {
     Document *d=layout->document;
     const Glyph *g=page->glyphs;
     size_t i=f.first;
@@ -74,7 +70,19 @@ static int emit(PdfLayout *layout, const doc2struct_pdf_page *page, Fragment f,
         if(ds_proper(run.text)) run.flags|=PROPER_CASE;
         run.font=g[start].font*4/3; run.has_font=1;
         run.indent=fmax(0,f.left)*4/3; run.has_indent=1;
-        run.in_table=table; run.row=row; run.col=col; run.rowspan=run.colspan=1;
+        run.in_table=table; run.row=row; run.col=col; run.rowspan=rowspan; run.colspan=colspan;
+        run.logical_cell=table && layout->logical_cells;
+        if(layout->rules && (layout->rules->pdf.region_layout || layout->rules->pdf.clip_to_page || layout->rules->pdf.detect_decorations)) {
+            run.has_bbox=1; run.page=page->index;
+            run.bbox[0]=g[start].left; run.bbox[1]=g[start].top;
+            run.bbox[2]=g[start].right; run.bbox[3]=g[start].bottom;
+            for(j=start+1;j<end;j++) {
+                run.bbox[0]=fmin(run.bbox[0],g[j].left); run.bbox[1]=fmin(run.bbox[1],g[j].top);
+                run.bbox[2]=fmax(run.bbox[2],g[j].right); run.bbox[3]=fmax(run.bbox[3],g[j].bottom);
+            }
+            run.bbox[0]+=layout->origin_x;run.bbox[2]+=layout->origin_x;
+            for(j=0;j<4;j++) run.bbox[j]*=4.0/3;
+        }
         if(layout->stream) {
             if(!ds_flow_run(d,&run)) return 0;
         } else {
@@ -85,6 +93,10 @@ static int emit(PdfLayout *layout, const doc2struct_pdf_page *page, Fragment f,
         i=end;
     }
     return 1;
+}
+static int emit(PdfLayout *layout, const doc2struct_pdf_page *page, Fragment f,
+                int table, size_t row, size_t col, int leading_space) {
+    return ds_pdf_emit(layout,page,f,table,row,col,1,1,leading_space);
 }
 
 static int numeric(const Glyph *glyphs, Fragment f) {
@@ -164,7 +176,7 @@ int ds_pdf_layout(void *context, const doc2struct_pdf_page *page) {
             double right=f[r[previous].end-1].right;
             layout->soft_break=fabs(r[i].font-r[previous].font)<.5 &&
                 r[i].y-r[previous].y>0 && r[i].y-r[previous].y<=1.6*r[i].font &&
-                fabs(a.left-b.left)<=.5*r[i].font && right-a.left>.45*page->width;
+                fabs(a.left-b.left)<=.5*r[i].font && right-a.left>.45*(layout->region_width>0?layout->region_width:page->width);
         }
         if(table) {
             previous=SIZE_MAX;

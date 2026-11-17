@@ -25,16 +25,19 @@ and retains the first title's classification and every source item's metadata.
 
 text.preserve_styles opts into an additional runs field on non-table rows:
 [{"text": "plain ", "flags": 0}, {"text": "italic", "flags": 2}]. The text
-field remains plain. Flags are bold=1, italic=2 and underline=4; combined styles
+field remains plain. Flags are bold=1, italic=2, underline=4 and strikethrough=128; combined styles
 use their bitwise OR. The existing Markdown renderer consumes these runs.
-Matrix remains a 2D array of strings and has no inferred span/style metadata.
+Matrix remains a 2D array of plain strings. Tables can carry cell_runs entries
+with row/col coordinates and styled runs. Styles follow retained cells through
+row/column selection; cell rewrites that cannot retain alignment use plain text.
+No spans are inferred during standardization.
 
 headings.infer, styles and max_words control fallback heading inference; regex
 HeaderRules still take priority. max_words=0 means unlimited.
-text.join_wrapped_lines joins geometry-marked PDF continuations before heading
+text.join_wrapped_lines joins geometry-marked continuations before heading
 inference. wrap_hyphenation="preserve" keeps a trailing hyphen without adding a
 space; "remove" drops it when the continuation starts with a lowercase letter.
-PDF instruction export carries optional soft_break hints for this purpose.
+PDF and bounding-box adapters emit optional soft_break hints for this purpose.
 tables.protect_years prevents numeric suffixes from attaching to year headers;
 formatting_max_gap bounds blank cells crossed to join numeric prefixes/suffixes
 (-1 is unlimited; 0 permits only directly adjacent cells).

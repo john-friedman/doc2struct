@@ -6,6 +6,7 @@ int ds_parse(Document *document, Str input, const Rules *rules) {
     void *normalizer;
     input = ds_input(&document->arena, input);
     document->retain_table_cells = rules->unwrap_layout;
+    document->keep_single_row_tables = !rules->single_row_to_text;
     document->collect_hrefs = rules->collect_hrefs;
     document->preserve_styles = rules->preserve_styles;
     document->join_wrapped_lines = rules->join_wrapped_lines;

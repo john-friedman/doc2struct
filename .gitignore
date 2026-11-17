@@ -30,6 +30,7 @@ cmake-build-*/
 
 # Local experiments and generated outputs
 testing/
+experiments/
 
 # local filing data
 data/

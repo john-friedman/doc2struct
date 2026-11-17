@@ -24,6 +24,7 @@ typedef struct {
 static unsigned char cell_facts(Str, int);
 static void replace_cell(TableState *table, size_t index, Str text) {
     table->matrix->cells[index] = text;
+    if (table->matrix->styles) table->matrix->styles[index]=(doc2struct_cell_style){0};
     table->facts[index] = cell_facts(text, table->formatting);
 }
 
@@ -236,6 +237,7 @@ static void select_rows(TableState *table, unsigned char *keep) {
         if (keep[i]) {
             if (i != j) {
                 memmove(m->cells + j * m->nc, m->cells + i * m->nc, m->nc * sizeof(Str));
+                if (m->styles) memmove(m->styles+j*m->nc,m->styles+i*m->nc,m->nc*sizeof(*m->styles));
                 memmove(table->facts + j * m->nc, table->facts + i * m->nc, m->nc);
             }
             j++;
@@ -251,13 +253,14 @@ static void select_cols(TableState *table, unsigned char *keep) {
         for (j = 0; j < m->nc; j++)
             if (keep[j]) {
                 table->facts[k] = table->facts[i * m->nc + j];
+                if (m->styles) m->styles[k]=m->styles[i*m->nc+j];
                 m->cells[k++] = m->cells[i * m->nc + j];
             }
     m->nc = nc;
 }
 static int clean_table(Document *d, const Rules *r, Row *row, Vec *scratch) {
     Matrix *m = &row->matrix;
-    TableState table = {m, NULL, enabled(r, 1)};
+    TableState table = {m, NULL, enabled(r, 1) && !row->logical_cells};
     size_t i, j, k, count = m->nr * m->nc;
     unsigned char *keep, *data_columns;
     row->cleaned = 0;
@@ -279,7 +282,7 @@ static int clean_table(Document *d, const Rules *r, Row *row, Vec *scratch) {
         table.facts[i] = i && same_cell(stripped, m->cells[i - 1]) ? table.facts[i - 1] :
                         cell_facts(stripped, table.formatting);
     }
-    if (enabled(r, 1)) {
+    if (enabled(r, 1) && !row->logical_cells) {
         data_columns = ds_alloc(&d->arena, m->nc);
         if (!data_columns)
             return 0;
@@ -425,6 +428,7 @@ static int clean_table(Document *d, const Rules *r, Row *row, Vec *scratch) {
                 }
             if (m->nr > 2) {
                 memmove(m->cells + m->nc, m->cells + 2 * m->nc, (m->nr - 2) * m->nc * sizeof(Str));
+                if (m->styles) memmove(m->styles+m->nc,m->styles+2*m->nc,(m->nr-2)*m->nc*sizeof(*m->styles));
                 memmove(table.facts + m->nc, table.facts + 2 * m->nc, (m->nr - 2) * m->nc);
             }
             m->nr--;

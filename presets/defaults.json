@@ -11,6 +11,12 @@
     },
     "partialsgml": {
       "tab_size": 8
+    },
+    "pdf": {
+      "clip_to_page": false,
+      "detect_decorations": false,
+      "layout": "default",
+      "font_recovery": "default"
     }
   },
   "headers": [],

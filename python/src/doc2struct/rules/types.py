@@ -16,7 +16,9 @@ from .defaults import (DEFAULT_HEADER_STYLES, DEFAULT_FOOTNOTE_LINES, DEFAULT_FO
                        DEFAULT_JOIN_WRAPPED_LINES, DEFAULT_WRAP_HYPHENATION,
                        DEFAULT_INFER_HEADINGS, DEFAULT_INFERRED_HEADING_STYLES,
                        DEFAULT_HEADING_MAX_WORDS, DEFAULT_MERGE_ADJACENT_HEADINGS,
-                       DEFAULT_PROTECT_YEARS, DEFAULT_FORMATTING_MAX_GAP)
+                       DEFAULT_PROTECT_YEARS, DEFAULT_FORMATTING_MAX_GAP,
+                       DEFAULT_PDF_CLIP_TO_PAGE, DEFAULT_PDF_DETECT_DECORATIONS,
+                       DEFAULT_PDF_LAYOUT, DEFAULT_PDF_FONT_RECOVERY)
 
 
 # ---------------------------------------------------------------------------------------------- adapters
@@ -47,20 +49,38 @@ class TextAdapterRules:
 
 
 @dataclass(frozen=True)
+class PDFAdapterRules:
+    """Opt-in native PDF policies; default retains the selected adapter's behavior."""
+    clip_to_page: bool = DEFAULT_PDF_CLIP_TO_PAGE
+    detect_decorations: bool = DEFAULT_PDF_DETECT_DECORATIONS
+    layout: str = DEFAULT_PDF_LAYOUT
+    font_recovery: str = DEFAULT_PDF_FONT_RECOVERY
+
+    def to_dict(self):
+        return dict(self.__dict__)
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(**d)
+
+
+@dataclass(frozen=True)
 class AdapterRules:
     html: HTMLAdapterRules = field(default_factory=HTMLAdapterRules)
     text: TextAdapterRules = field(default_factory=TextAdapterRules)
     partialsgml: TextAdapterRules = field(default_factory=lambda: TextAdapterRules(DEFAULT_PARTIALSGML_TAB_SIZE))
+    pdf: PDFAdapterRules = field(default_factory=PDFAdapterRules)
 
     def to_dict(self):
         return {'html': self.html.to_dict(), 'text': self.text.to_dict(),
-                'partialsgml': self.partialsgml.to_dict()}
+                'partialsgml': self.partialsgml.to_dict(), 'pdf': self.pdf.to_dict()}
 
     @classmethod
     def from_dict(cls, d):
         return cls(html=HTMLAdapterRules.from_dict(d.get('html', {})),
                    text=TextAdapterRules.from_dict(d.get('text', {})),
-                   partialsgml=TextAdapterRules(tab_size=d.get('partialsgml', {}).get('tab_size', DEFAULT_PARTIALSGML_TAB_SIZE)))
+                   partialsgml=TextAdapterRules(tab_size=d.get('partialsgml', {}).get('tab_size', DEFAULT_PARTIALSGML_TAB_SIZE)),
+                   pdf=PDFAdapterRules.from_dict(d.get('pdf', {})))
 
 
 # ------------------------------------------------------------------------------------ standardized text

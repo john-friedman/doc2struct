@@ -17,6 +17,8 @@ typedef struct doc2struct_style doc2struct_style;
 typedef struct { const char *p; size_t n; } doc2struct_string;
 typedef struct { char message[256]; } doc2struct_error;
 enum { DOC2STRUCT_TEXT, DOC2STRUCT_START, DOC2STRUCT_END };
+enum { DOC2STRUCT_BOLD=1, DOC2STRUCT_ITALIC=2, DOC2STRUCT_UNDERLINE=4,
+       DOC2STRUCT_STRIKETHROUGH=128, DOC2STRUCT_TEXT_STYLES=135 };
 enum { DOC2STRUCT_STYLE, DOC2STRUCT_COLSPAN, DOC2STRUCT_ROWSPAN, DOC2STRUCT_HREF,
        DOC2STRUCT_SRC, DOC2STRUCT_ALT, DOC2STRUCT_HIDDEN, DOC2STRUCT_ATTRIBUTE_COUNT };
 typedef struct {
@@ -38,13 +40,21 @@ typedef struct {
     unsigned flags;
     double font, indent;
     int in_table, has_font, has_indent;
-    int soft_break; /* PDF geometry identifies a possible wrapped continuation. */
+    int soft_break; /* Layout geometry identifies a possible wrapped continuation. */
+    int logical_cell; /* Cell boundaries are already resolved; keep numeric marks in their cells. */
+    size_t page;
+    double bbox[4]; /* Optional top-left CSS-pixel x0,y0,x1,y1 source bounds. */
+    int has_bbox;
 } doc2struct_run;
-typedef struct { doc2struct_string *cells; size_t nr, nc; } doc2struct_matrix;
+typedef struct { doc2struct_string text; unsigned flags; } doc2struct_text_run;
+typedef struct { doc2struct_text_run *runs; size_t count; } doc2struct_cell_style;
+typedef struct {
+    doc2struct_string *cells; size_t nr, nc;
+    doc2struct_cell_style *styles; /* Optional parallel array; cells stay plain strings. */
+} doc2struct_matrix;
 typedef struct { doc2struct_string id, text; } doc2struct_note;
 
 /* Optional styled slices of plain row text; matrix cells remain strings. */
-typedef struct { doc2struct_string text; unsigned flags; } doc2struct_text_run;
 typedef struct {
     size_t id, level;
     doc2struct_string type, klass, title, text, preamble, postamble;
@@ -57,6 +67,7 @@ typedef struct {
     unsigned style_mask;
     doc2struct_text_run *text_runs;
     size_t ntext_runs;
+    int logical_cells;
 } doc2struct_row;
 typedef struct {
     doc2struct_string name, source, dtype, which;
@@ -70,7 +81,7 @@ typedef struct {
     doc2struct_string value; /* Optional regex replacement; NULL means capture extraction. */
 } doc2struct_column;
 
-/* NULL name loads defaults. Names and SEC document aliases are case-insensitive.
+/* NULL name loads defaults. Names and document aliases are case-insensitive.
  * JSON accepts a partial rules object; defaults and validation live in C.
  * Rules are immutable after creation and may be shared by independent parsers. */
 doc2struct_rules *doc2struct_rules_preset(const char *name, doc2struct_error *error);
@@ -105,7 +116,7 @@ size_t doc2struct_parser_cached_bytes(const doc2struct_parser *);
  * come from the compiled rules' adapters section. */
 doc2struct_document *doc2struct_parse(doc2struct_parser *, doc2struct_string input,
                                     const doc2struct_rules *, doc2struct_error *error);
-/* Required doc2struct PDFium bridge runtime (ABI 1). Pass an absolute UTF-8
+/* Required doc2struct PDFium bridge runtime (ABI 2). Pass an absolute UTF-8
  * path to a private copy, not a library initialized by another wrapper. Initialization
  * is idempotent for that path; the engine lives until process exit. PDFium calls
  * are serialized internally; layout/standardization do not hold its lock. */
@@ -117,6 +128,37 @@ doc2struct_document *doc2struct_parse_pdf(doc2struct_parser *, doc2struct_string
                                         const doc2struct_rules *, doc2struct_error *error);
 doc2struct_document *doc2struct_pdf_instructions(doc2struct_parser *, doc2struct_string input,
                                                const doc2struct_rules *, doc2struct_error *error);
+/* Opt-in layout selection; NULL follows rules.adapters.pdf.layout, while
+ * "pdf_adapter" explicitly selects the original layout.
+ * "pdf_adapter_experimental" uses text and vector rules to reconstruct tables
+ * and matches vector glyphs when embedded font Unicode maps are missing.
+ * Both adapters produce the same standardized output schema. */
+doc2struct_document *doc2struct_parse_pdf_with_adapter(doc2struct_parser *, doc2struct_string input,
+        const doc2struct_rules *, const char *adapter, doc2struct_error *error);
+doc2struct_document *doc2struct_pdf_instructions_with_adapter(doc2struct_parser *, doc2struct_string input,
+        const doc2struct_rules *, const char *adapter, doc2struct_error *error);
+/* External OCR word/region boxes, in page pixels with a top-left origin.
+ * Boxes may be unordered; pages are in document order. Text must be UTF-8.
+ * Optional flags use DOC2STRUCT_TEXT_STYLES. dpi=0 assumes a 1056px reference
+ * page height; a positive dpi supplies physical scale. No OCR is performed.
+ * Geometry determines layout and is not included in the resulting runs/rows.
+ * Inputs need only live until return; the result owns its text. */
+typedef struct {
+    doc2struct_string text;
+    double left, top, right, bottom;
+    unsigned flags;
+} doc2struct_bb_word;
+
+typedef struct {
+    double width, height, dpi;
+    const doc2struct_bb_word *words;
+    size_t count;
+} doc2struct_bb_page;
+
+doc2struct_document *doc2struct_parse_bb(doc2struct_parser *, const doc2struct_bb_page *, size_t count,
+                                       const doc2struct_rules *, doc2struct_error *error);
+doc2struct_document *doc2struct_bb_instructions(doc2struct_parser *, const doc2struct_bb_page *, size_t count,
+                                              const doc2struct_rules *, doc2struct_error *error);
 /* Individual text document bodies; the caller selects the syntax. Text mode
  * treats angle brackets literally. Partial SGML consumes known layout tags,
  * retaining unknown tags/field names. Both return the same runs as HTML/PDF.
@@ -139,14 +181,17 @@ doc2struct_document *doc2struct_parse_partialsgml(doc2struct_parser *, doc2struc
  * cancels extraction. Callbacks run outside the engine lock. */
 typedef struct {
     uint32_t unicode;
-    unsigned flags; /* bold=1, italic=2 */
+    unsigned flags; /* DOC2STRUCT_BOLD/ITALIC/UNDERLINE/STRIKETHROUGH */
     int space_before;
     double left, top, right, bottom, x, y, font, dx, dy;
 } doc2struct_pdf_glyph;
+typedef struct { double left, top, right, bottom, thickness; unsigned structural; } doc2struct_pdf_rule;
 typedef struct {
     size_t index, count;
     double width, height;
     const doc2struct_pdf_glyph *glyphs;
+    const doc2struct_pdf_rule *rules;
+    size_t rule_count;
 } doc2struct_pdf_page;
 typedef int (*doc2struct_pdf_page_sink)(void *, const doc2struct_pdf_page *);
 int doc2struct_pdf_visit(doc2struct_string input,

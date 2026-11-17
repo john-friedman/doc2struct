@@ -123,7 +123,9 @@ static int row_text(Writer *w,const Row *row) {
         if((flags&1)&&!literal(w,"<strong>"))return 0;
         if((flags&2)&&!literal(w,"<em>"))return 0;
         if((flags&4)&&!literal(w,"<u>"))return 0;
+        if((flags&DOC2STRUCT_STRIKETHROUGH)&&!literal(w,"<s>"))return 0;
         if(!text(w,(Str){s.p+begin,end-begin}))return 0;
+        if((flags&DOC2STRUCT_STRIKETHROUGH)&&!literal(w,"</s>"))return 0;
         if((flags&4)&&!literal(w,"</u>"))return 0;
         if((flags&2)&&!literal(w,"</em>"))return 0;
         if((flags&1)&&!literal(w,"</strong>"))return 0;
@@ -154,8 +156,12 @@ static int table(Writer *w, const Row *r, Str heading) {
         if (!literal(w, "\n")) return 0;
         for (i = 0; i < m->nr; i++) {
             if (!literal(w, "|")) return 0;
-            for (j = 0; j < m->nc; j++)
-                if (!literal(w, " ") || !text(w, m->cells[i * m->nc + j]) || !literal(w, " |")) return 0;
+            for (j = 0; j < m->nc; j++) {
+                size_t index=i*m->nc+j;
+                Row cell={0};cell.text=m->cells[index];cell.style_mask=r->style_mask;
+                if (m->styles) { cell.text_runs=m->styles[index].runs;cell.ntext_runs=m->styles[index].count; }
+                if (!literal(w, " ") || !row_text(w,&cell) || !literal(w, " |")) return 0;
+            }
             if (!literal(w, "\n")) return 0;
         }
     }

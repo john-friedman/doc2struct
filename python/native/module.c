@@ -1,6 +1,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <math.h>
 #include <doc2struct/doc2struct.h>
+#define TEXT_STYLES DOC2STRUCT_TEXT_STYLES
 typedef doc2struct_string Str;
 typedef doc2struct_document Document;
 typedef doc2struct_rules Rules;
@@ -16,7 +18,6 @@ typedef doc2struct_matrix Matrix;
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <math.h>
 #include <limits.h>
 
 enum {
@@ -306,6 +307,17 @@ static PyObject *export_runs(PyObject *module, Document *d) {
         if(r->soft_break && PyDict_SetItemString(row,"soft_break",Py_True)<0) {
             Py_DECREF(row);goto error;
         }
+        if(r->logical_cell && PyDict_SetItemString(row,"logical_cell",Py_True)<0) {
+            Py_DECREF(row);goto error;
+        }
+        if(r->has_bbox) {
+            PyObject *source_page=PyLong_FromSize_t(r->page);
+            PyObject *bounds=Py_BuildValue("(dddd)",r->bbox[0],r->bbox[1],r->bbox[2],r->bbox[3]);
+            int failed=!source_page || !bounds;
+            if(!failed) failed=PyDict_SetItemString(row,"page",source_page)<0 || PyDict_SetItemString(row,"bbox",bounds)<0;
+            Py_XDECREF(source_page);Py_XDECREF(bounds);
+            if(failed){Py_DECREF(row);goto error;}
+        }
         PyList_SET_ITEM(list, (Py_ssize_t)i, row);
     }
     return list;
@@ -446,6 +458,32 @@ static int import_runs(PyObject *module, Document *d, PyObject *instructions) {
         if(v) {
             r->soft_break = PyObject_IsTrue(v);
             if(r->soft_break < 0)goto error;
+        }
+        v = PyDict_GetItemString(o, "logical_cell");
+        if(v) {
+            r->logical_cell = PyObject_IsTrue(v);
+            if(r->logical_cell < 0)goto error;
+        }
+        v = PyDict_GetItemString(o, "bbox");
+        if(v && v!=Py_None) {
+            PyObject *bounds=PySequence_Fast(v,"instruction bbox must contain x0,y0,x1,y1");
+            size_t coordinate;
+            if(!bounds)goto error;
+            if(PySequence_Fast_GET_SIZE(bounds)!=4) {
+                Py_DECREF(bounds);PyErr_SetString(PyExc_ValueError,"instruction bbox must have four coordinates");goto error;
+            }
+            for(coordinate=0;coordinate<4;coordinate++) {
+                r->bbox[coordinate]=PyFloat_AsDouble(PySequence_Fast_GET_ITEM(bounds,(Py_ssize_t)coordinate));
+                if(PyErr_Occurred() || !isfinite(r->bbox[coordinate]))break;
+            }
+            Py_DECREF(bounds);
+            if(coordinate!=4 || r->bbox[2]<r->bbox[0] || r->bbox[3]<r->bbox[1]) {
+                if(!PyErr_Occurred())PyErr_SetString(PyExc_ValueError,"invalid instruction bbox");goto error;
+            }
+            r->has_bbox=1;
+            v=PyDict_GetItemString(o,"page");
+            if(v && v!=Py_None)r->page=PyLong_AsSize_t(v);
+            if(PyErr_Occurred())goto error;
         }
         r->text = string(d, get(o, keys[RK_TEXT]));
         if (!r->text.p && !PyErr_Occurred())
@@ -678,6 +716,21 @@ static PyObject *styled_runs(const Row *row) {
     }
     return out;
 }
+static PyObject *cell_runs(const Row *row) {
+    size_t i;PyObject *out=PyList_New(0);
+    if(!out)return NULL;
+    for(i=0;row->matrix.styles && i<row->matrix.nr*row->matrix.nc;i++) {
+        const doc2struct_cell_style *cell=row->matrix.styles+i;
+        PyObject *value,*runs;Row styled={0};
+        if(!cell->count)continue;
+        styled.text_runs=cell->runs;styled.ntext_runs=cell->count;
+        runs=styled_runs(&styled);if(!runs){Py_DECREF(out);return NULL;}
+        value=Py_BuildValue("{s:n,s:n,s:N}","row",(Py_ssize_t)(i/row->matrix.nc),"col",(Py_ssize_t)(i%row->matrix.nc),"runs",runs);
+        if(!value||PyList_Append(out,value)<0){Py_XDECREF(value);Py_DECREF(out);return NULL;}
+        Py_DECREF(value);
+    }
+    return out;
+}
 static PyObject *export_rows(PyObject *module, Document *d, Rules *r, int with_rules) {
     ModuleState *state = conversion_state(module);
     PyObject **keys;
@@ -721,8 +774,9 @@ static PyObject *export_rows(PyObject *module, Document *d, Rules *r, int with_r
             goto error;
         }
         if (row->style_mask) {
-            PyObject *runs=styled_runs(row);
-            if(!runs || PyDict_SetItemString(out,"runs",runs)<0){Py_XDECREF(runs);Py_DECREF(out);goto error;}
+            const char *key=row->matrix.nr?"cell_runs":"runs";
+            PyObject *runs=row->matrix.nr?cell_runs(row):styled_runs(row);
+            if(!runs || PyDict_SetItemString(out,key,runs)<0){Py_XDECREF(runs);Py_DECREF(out);goto error;}
             Py_DECREF(runs);
         }
         for (j = 0; j < ncolumns; j++) {
@@ -746,6 +800,9 @@ error:
 static void markdown_rows_free(Row *rows, size_t count) {
     size_t i;
     for (i = 0; i < count; i++) {
+        size_t j;
+        for(j=0;rows[i].matrix.styles && j<rows[i].matrix.nr*rows[i].matrix.nc;j++)PyMem_Free(rows[i].matrix.styles[j].runs);
+        PyMem_Free(rows[i].matrix.styles);
         PyMem_Free(rows[i].matrix.cells);
         PyMem_Free(rows[i].notes);
         PyMem_Free(rows[i].text_runs);
@@ -846,7 +903,7 @@ static int markdown_runs(Document *d,PyObject *value,Row *r) {
     seq=PySequence_Fast(value,"runs must be a sequence");if(!seq)return 0;
     n=PySequence_Fast_GET_SIZE(seq);
     if((size_t)n>SIZE_MAX/sizeof(*r->text_runs)){Py_DECREF(seq);PyErr_NoMemory();return 0;}
-    r->style_mask=7;r->ntext_runs=(size_t)n;
+    r->style_mask=TEXT_STYLES;r->ntext_runs=(size_t)n;
     if(n)r->text_runs=PyMem_Calloc((size_t)n,sizeof(*r->text_runs));
     if(n&&!r->text_runs){Py_DECREF(seq);PyErr_NoMemory();return 0;}
     for(i=0;i<n;i++) {
@@ -854,10 +911,34 @@ static int markdown_runs(Document *d,PyObject *value,Row *r) {
         if(!PyDict_Check(item)){PyErr_SetString(PyExc_TypeError,"each styled run must be a dictionary");Py_DECREF(seq);return 0;}
         r->text_runs[i].text=string(d,PyDict_GetItemString(item,"text"));
         flags=PyDict_GetItemString(item,"flags");
-        r->text_runs[i].flags=flags?(unsigned)PyLong_AsUnsignedLong(flags)&7u:0;
+        r->text_runs[i].flags=flags?(unsigned)PyLong_AsUnsignedLong(flags)&TEXT_STYLES:0;
         if(PyErr_Occurred()){Py_DECREF(seq);return 0;}
     }
     Py_DECREF(seq);return 1;
+}
+static int markdown_cell_runs(Document *d,PyObject *value,Row *r) {
+    PyObject *seq;Py_ssize_t i,n;
+    if(!value||value==Py_None)return 1;
+    seq=PySequence_Fast(value,"cell_runs must be a sequence");if(!seq)return 0;
+    n=PySequence_Fast_GET_SIZE(seq);
+    if(n)r->matrix.styles=PyMem_Calloc(r->matrix.nr*r->matrix.nc,sizeof(*r->matrix.styles));
+    if(n && !r->matrix.styles){Py_DECREF(seq);PyErr_NoMemory();return 0;}
+    r->style_mask=TEXT_STYLES;
+    for(i=0;i<n;i++) {
+        PyObject *entry=PySequence_Fast_GET_ITEM(seq,i),*vr,*vc;size_t row,col;Row styled={0};
+        if(!PyDict_Check(entry)){PyErr_SetString(PyExc_TypeError,"each cell_runs entry must be a dictionary");goto error;}
+        vr=PyDict_GetItemString(entry,"row");vc=PyDict_GetItemString(entry,"col");
+        if(!vr||!vc){PyErr_SetString(PyExc_ValueError,"cell_runs requires row and col");goto error;}
+        row=PyLong_AsSize_t(vr);col=PyLong_AsSize_t(vc);
+        if(PyErr_Occurred())goto error;
+        if(row>=r->matrix.nr||col>=r->matrix.nc){PyErr_SetString(PyExc_ValueError,"cell_runs coordinates exceed matrix bounds");goto error;}
+        if(!markdown_runs(d,PyDict_GetItemString(entry,"runs"),&styled)){PyMem_Free(styled.text_runs);goto error;}
+        PyMem_Free(r->matrix.styles[row*r->matrix.nc+col].runs);
+        r->matrix.styles[row*r->matrix.nc+col]=(doc2struct_cell_style){styled.text_runs,styled.ntext_runs};
+    }
+    Py_DECREF(seq);return 1;
+error:
+    Py_DECREF(seq);return 0;
 }
 static PyObject *markdown(PyObject *self, PyObject *args) {
     PyObject *input_rows, *seq = NULL, *result = NULL;
@@ -898,6 +979,7 @@ static PyObject *markdown(PyObject *self, PyObject *args) {
         if ((str_is(r->type, "table") || str_is(r->type, "list")) &&
             (!markdown_matrix(d, PyDict_GetItemString(o, "matrix"), &r->matrix, str_is(r->type, "list")) ||
              !markdown_notes(d, PyDict_GetItemString(o, "footnotes"), r))) goto done;
+        if (!markdown_cell_runs(d,PyDict_GetItemString(o,"cell_runs"),r))goto done;
     }
     if (native_error(doc2struct_document_error(d))) goto done;
     Py_BEGIN_ALLOW_THREADS
@@ -1130,11 +1212,19 @@ static PyObject *native_columns(PyObject *self, PyObject *capsule) {
         PyObject *values=PyList_New((Py_ssize_t)nrows);
         if(!values)goto error;
         for(i=0;i<nrows;i++) {
-            PyObject *value=rows[i].style_mask?styled_runs(rows+i):Py_NewRef(Py_None);
+            PyObject *value=rows[i].style_mask && !rows[i].matrix.nr?styled_runs(rows+i):Py_NewRef(Py_None);
             if(!value){Py_DECREF(values);goto error;}
             PyList_SET_ITEM(values,(Py_ssize_t)i,value);
         }
         if(PyDict_SetItemString(columns,"runs",values)<0){Py_DECREF(values);goto error;}
+        Py_DECREF(values);
+        values=PyList_New((Py_ssize_t)nrows);if(!values)goto error;
+        for(i=0;i<nrows;i++) {
+            PyObject *value=rows[i].style_mask && rows[i].matrix.nr?cell_runs(rows+i):Py_NewRef(Py_None);
+            if(!value){Py_DECREF(values);goto error;}
+            PyList_SET_ITEM(values,(Py_ssize_t)i,value);
+        }
+        if(PyDict_SetItemString(columns,"cell_runs",values)<0){Py_DECREF(values);goto error;}
         Py_DECREF(values);
     }
     for (j = 0; j < ncolumns; j++) {
@@ -1274,10 +1364,11 @@ static PyObject *pdf_impl(PyObject *self, PyObject *args, int instructions) {
     doc2struct_error error;
     Str bytes;
     int with_rules = 0;
+    const char *adapter = NULL;
     if (instructions) {
-        if (!PyArg_ParseTuple(args, "OO:pdf_instructions", &pdf, &capsule)) return NULL;
+        if (!PyArg_ParseTuple(args, "OO|z:pdf_instructions", &pdf, &capsule, &adapter)) return NULL;
     } else {
-        if (!PyArg_ParseTuple(args, "OOp|O:parse_pdf", &pdf, &capsule, &with_rules, &parser_capsule)) return NULL;
+        if (!PyArg_ParseTuple(args, "OOp|Oz:parse_pdf", &pdf, &capsule, &with_rules, &parser_capsule, &adapter)) return NULL;
     }
     rules = PyCapsule_GetPointer(capsule, "doc2struct.Rules");
     if (!rules) return NULL;
@@ -1302,8 +1393,8 @@ static PyObject *pdf_impl(PyObject *self, PyObject *args, int instructions) {
     if (parser) parser->busy = 1;
     Py_BEGIN_ALLOW_THREADS
     document = instructions
-        ? doc2struct_pdf_instructions(parser ? parser->context : NULL, bytes, rules, &error)
-        : doc2struct_parse_pdf(parser ? parser->context : NULL, bytes, rules, &error);
+        ? doc2struct_pdf_instructions_with_adapter(parser ? parser->context : NULL, bytes, rules, adapter, &error)
+        : doc2struct_parse_pdf_with_adapter(parser ? parser->context : NULL, bytes, rules, adapter, &error);
     Py_END_ALLOW_THREADS
     if (document) result = instructions ? export_runs(self, document) : export_rows(self, document,rules,with_rules);
     else native_error(error.message);
@@ -1365,7 +1456,173 @@ static PyObject *partialsgml_instructions(PyObject *self, PyObject *args) { retu
 static PyObject *parse_text(PyObject *self, PyObject *args) { return text_impl(self, args, 0, 0); }
 static PyObject *parse_partialsgml(PyObject *self, PyObject *args) { return text_impl(self, args, 1, 0); }
 
+typedef struct {
+    doc2struct_bb_page *pages;
+    size_t count;
+    Document *strings;
+} BBInput;
+
+static void bb_input_free(BBInput *input) {
+    size_t i;
+    for (i=0;i<input->count;i++) PyMem_Free((void *)input->pages[i].words);
+    PyMem_Free(input->pages);
+    doc2struct_document_free(input->strings);
+}
+
+static int bb_number(PyObject *value, double *number, const char *name) {
+    if (!value || PyBool_Check(value) || PyUnicode_Check(value) || PyBytes_Check(value)) {
+        PyErr_Format(PyExc_TypeError,"%s must be a number",name);
+        return 0;
+    }
+    *number=PyFloat_AsDouble(value);
+    if (PyErr_Occurred()) return 0;
+    if (!isfinite(*number)) {
+        PyErr_Format(PyExc_ValueError,"%s must be finite",name);
+        return 0;
+    }
+    return 1;
+}
+
+static int bb_import_word(BBInput *input, doc2struct_bb_page *page, PyObject *entry, size_t index) {
+    doc2struct_bb_word *word=(doc2struct_bb_word *)page->words+index;
+    PyObject *text,*bounds,*value;
+    double coordinates[4];
+    Py_ssize_t length,i;
+    const char *utf8;
+    unsigned long flags;
+    if (!PyDict_Check(entry)) {
+        PyErr_SetString(PyExc_TypeError,"each OCR box must be a dictionary");
+        return 0;
+    }
+    text=PyDict_GetItemString(entry,"text");
+    if (!text || !PyUnicode_Check(text)) {
+        PyErr_SetString(PyExc_TypeError,"OCR box text must be str");
+        return 0;
+    }
+    utf8=PyUnicode_AsUTF8AndSize(text,&length);
+    if (!utf8) return 0;
+    word->text=doc2struct_document_copy(input->strings,(Str){utf8,(size_t)length});
+    if (!word->text.p) { native_error(doc2struct_document_error(input->strings)); return 0; }
+    value=PyDict_GetItemString(entry,"bbox");
+    if (!value) { PyErr_SetString(PyExc_ValueError,"OCR box requires bbox"); return 0; }
+    bounds=PySequence_Tuple(value);
+    if (!bounds) return 0;
+    if (PySequence_Fast_GET_SIZE(bounds)!=4) {
+        Py_DECREF(bounds);
+        PyErr_SetString(PyExc_ValueError,"bbox must contain [left, top, right, bottom]");
+        return 0;
+    }
+    for (i=0;i<4;i++)
+        if (!bb_number(PySequence_Fast_GET_ITEM(bounds,i),coordinates+i,"bbox coordinate")) {
+            Py_DECREF(bounds); return 0;
+        }
+    Py_DECREF(bounds);
+    if (coordinates[0]<0 || coordinates[1]<0 || coordinates[2]<=coordinates[0] ||
+        coordinates[3]<=coordinates[1] || coordinates[2]>page->width || coordinates[3]>page->height) {
+        PyErr_SetString(PyExc_ValueError,"bbox must have positive area and lie within the page");
+        return 0;
+    }
+    word->left=coordinates[0]; word->top=coordinates[1];
+    word->right=coordinates[2]; word->bottom=coordinates[3];
+    value=PyDict_GetItemString(entry,"flags");
+    if (value) {
+        flags=PyLong_AsUnsignedLong(value);
+        if (PyErr_Occurred()) return 0;
+        if (flags & ~(unsigned long)DOC2STRUCT_TEXT_STYLES) {
+            PyErr_SetString(PyExc_ValueError,"flags may contain only existing text style bits");
+            return 0;
+        }
+        word->flags=(unsigned)flags;
+    }
+    return 1;
+}
+
+static int bb_import(BBInput *input, PyObject *pages) {
+    PyObject *sequence=PySequence_Tuple(pages);
+    Py_ssize_t count,i;
+    int ok=0;
+    if (!sequence) return 0;
+    count=PySequence_Fast_GET_SIZE(sequence);
+    if (!(input->strings=new_document())) goto done;
+    input->pages=PyMem_Calloc((size_t)count? (size_t)count:1,sizeof(doc2struct_bb_page));
+    if (!input->pages) { PyErr_NoMemory(); goto done; }
+    input->count=(size_t)count;
+    for (i=0;i<count;i++) {
+        doc2struct_bb_page *page=input->pages+i;
+        PyObject *entry=PySequence_Fast_GET_ITEM(sequence,i),*words,*value;
+        Py_ssize_t j,n;
+        if (!PyDict_Check(entry)) { PyErr_SetString(PyExc_TypeError,"each page must be a dictionary"); goto done; }
+        if (!bb_number(PyDict_GetItemString(entry,"width"),&page->width,"page width") ||
+            !bb_number(PyDict_GetItemString(entry,"height"),&page->height,"page height")) goto done;
+        value=PyDict_GetItemString(entry,"dpi");
+        if (value && !bb_number(value,&page->dpi,"page dpi")) goto done;
+        if (page->width<=0 || page->height<=0 || (value && page->dpi<=0)) {
+            PyErr_SetString(PyExc_ValueError,"page width, height and optional dpi must be positive"); goto done;
+        }
+        value=PyDict_GetItemString(entry,"words");
+        if (!value) value=PyDict_GetItemString(entry,"regions");
+        if (!value) { PyErr_SetString(PyExc_ValueError,"page requires words (or regions)"); goto done; }
+        words=PySequence_Tuple(value);
+        if (!words) goto done;
+        n=PySequence_Fast_GET_SIZE(words);
+        page->words=PyMem_Calloc((size_t)n? (size_t)n:1,sizeof(doc2struct_bb_word));
+        if (!page->words) { Py_DECREF(words); PyErr_NoMemory(); goto done; }
+        page->count=(size_t)n;
+        for (j=0;j<n;j++) if (!bb_import_word(input,page,PySequence_Fast_GET_ITEM(words,j),(size_t)j)) break;
+        Py_DECREF(words);
+        if (j!=n) goto done;
+    }
+    ok=1;
+done:
+    Py_DECREF(sequence);
+    return ok;
+}
+
+static PyObject *bb_impl(PyObject *self, PyObject *args, int instructions) {
+    PyObject *pages,*capsule,*result=NULL,*parser_capsule=Py_None;
+    NativeParser *parser=NULL;
+    BBInput input={0};
+    Document *document=NULL;
+    Rules *rules;
+    doc2struct_error error={0};
+    int with_rules=0;
+    if (instructions) {
+        if (!PyArg_ParseTuple(args,"OO:bb_instructions",&pages,&capsule)) return NULL;
+    } else if (!PyArg_ParseTuple(args,"OOp|O:parse_bb",&pages,&capsule,&with_rules,&parser_capsule)) return NULL;
+    rules=PyCapsule_GetPointer(capsule,"doc2struct.Rules");
+    if (!rules || !bb_import(&input,pages)) goto done;
+    if(parser_capsule==Py_None) {
+        parser_capsule=default_parser(self);
+        if (!parser_capsule) goto done;
+        parser=PyCapsule_GetPointer(parser_capsule,"doc2struct.Parser");
+        if (!parser) goto done;
+        if (parser->busy) parser=NULL;
+    } else {
+        parser=idle_parser(parser_capsule);
+        if (!parser) goto done;
+        if (parser->closed) { PyErr_SetString(PyExc_ValueError,"Parser is closed"); goto done; }
+    }
+    if (parser) parser->busy=1;
+    Py_BEGIN_ALLOW_THREADS
+    document=instructions
+        ? doc2struct_bb_instructions(parser?parser->context:NULL,input.pages,input.count,rules,&error)
+        : doc2struct_parse_bb(parser?parser->context:NULL,input.pages,input.count,rules,&error);
+    Py_END_ALLOW_THREADS
+    if (document) result=instructions?export_runs(self,document):export_rows(self,document,rules,with_rules);
+    else native_error(error.message);
+    doc2struct_document_free(document);
+    if (parser) parser->busy=0;
+done:
+    bb_input_free(&input);
+    return result;
+}
+
+static PyObject *bb_instructions(PyObject *self,PyObject *args) { return bb_impl(self,args,1); }
+static PyObject *bb_parse(PyObject *self,PyObject *args) { return bb_impl(self,args,0); }
+
 static PyMethodDef methods[] = {
+    {"parse_bb",bb_parse,METH_VARARGS,"Resolve external OCR boxes and standardize in C."},
+    {"bb_instructions",bb_instructions,METH_VARARGS,"Convert external OCR boxes to existing instructions."},
     {"markdown", markdown, METH_VARARGS, "Render standardized Python rows as Markdown in C."},
     {"parse_text", parse_text, METH_VARARGS, "Parse plain text through native layout and standardization."},
     {"parse_partialsgml", parse_partialsgml, METH_VARARGS, "Parse partial SGML through native layout and standardization."},

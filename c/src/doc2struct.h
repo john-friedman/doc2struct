@@ -54,8 +54,15 @@ enum {
     CENTERED = 8,
     ALL_CAPS = 16,
     PROPER_CASE = 32,
-    FAKE_TABLE = 64
+    FAKE_TABLE = 64,
+    STRIKETHROUGH = 128
 };
+#define TEXT_STYLES DOC2STRUCT_TEXT_STYLES
+
+typedef struct {
+    int clip_to_page, detect_decorations, region_layout;
+    int font_recovery; /* 0: selected adapter's original policy, 1: metadata, 2: glyphs. */
+} PdfOptions;
 typedef doc2struct_run Run;
 typedef doc2struct_token Token;
 
@@ -94,6 +101,7 @@ typedef doc2struct_column Column;
 typedef struct doc2struct_rules {
     Arena arena;
     Options html;
+    PdfOptions pdf;
     size_t text_tab_size, partialsgml_tab_size;
     Regex *regexes;
     Header *headers;
@@ -142,6 +150,7 @@ typedef struct {
     Item *table_cells;
     size_t ntable_cells;
     int layout_text;
+    int logical_cells;
     int redundant;
     TextView *text_view;
 } Line;
@@ -173,6 +182,7 @@ typedef struct doc2struct_document {
     void *flow;
     int skip_text, skip_blank;
     int retain_table_cells;
+    int keep_single_row_tables;
     int collect_hrefs;
     int no_fonts;
     unsigned preserve_styles;
@@ -237,6 +247,7 @@ int ds_parser_parse(ParserContext *, Document *, Str, const Rules *);
 void ds_parser_clear(ParserContext *);
 int ds_flow_begin(Document *);
 int ds_flow_run(Document *, const Run *);
+int ds_style_align(Document *,Str,const doc2struct_text_run *,size_t,doc2struct_cell_style *);
 int ds_flow_finish(Document *);
 Str ds_json(Document *, const Rules *, int, Arena *);
 int ds_tables(Document *, const Rules *);

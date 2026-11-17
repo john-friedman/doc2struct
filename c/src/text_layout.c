@@ -1055,9 +1055,10 @@ static Document *text_document(ParserContext *parser, Str input, const Rules *ru
     layout.stream = rules != NULL;
     if (rules) {
         d->retain_table_cells = rules->unwrap_layout;
+        d->keep_single_row_tables = !rules->single_row_to_text;
         d->collect_hrefs = rules->collect_hrefs;
-    d->preserve_styles = rules->preserve_styles;
-    d->join_wrapped_lines = rules->join_wrapped_lines;
+        d->preserve_styles = rules->preserve_styles;
+        d->join_wrapped_lines = rules->join_wrapped_lines;
     }
     input = ds_input(&d->arena, input);
     /* One owned backing buffer lets ordinary ASCII lines be borrowed views.

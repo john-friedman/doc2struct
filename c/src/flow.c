@@ -13,12 +13,15 @@ typedef struct {
     Str tag;
     size_t block, first_line;
     int in_table;
+    int logical_cell;
     size_t row, col, rs, cs, line, records, parts, head, tail, bytes;
     Str text, href, image_src;
     double font, indent;
     unsigned flags;
     int has_font, has_indent;
     Vec *hrefs;
+    Vec styled;
+    doc2struct_cell_style style;
 } FlowCell;
 
 typedef struct {
@@ -28,7 +31,7 @@ typedef struct {
     size_t grid_cap;
     size_t block;
     size_t max_row, max_col, last_row, last_col;
-    int active, table, has_coordinate, unordered;
+    int active, table, has_coordinate, unordered, logical_cells;
 } Flow;
 
 static int image(const Item *item) { return item->run.src.p != NULL; }
@@ -198,12 +201,18 @@ static int table_run(Flow *flow, const Run *run) {
         cell->block = run->block;
         cell->first_line = run->line;
         cell->in_table = run->in_table;
+        cell->logical_cell = run->logical_cell;
         cell->row = run->row;
         cell->col = run->col;
         cell->rs = run->rowspan;
         cell->cs = run->colspan;
     }
     cell->flags |= run->flags;
+    if (d->preserve_styles) {
+        doc2struct_text_run *part=ds_push(&d->arena,&cell->styled,sizeof(*part));
+        if (!part) return 0;
+        *part=(doc2struct_text_run){run->text,run->flags};
+    }
     if (run->has_font) {
         cell->has_font = 1;
         cell->font = run->font;
@@ -256,6 +265,7 @@ static Run cell_run(const FlowCell *cell) {
     Run run = {0};
     run.block = cell->block; run.line = cell->first_line; run.tag = cell->tag;
     run.in_table = cell->in_table;
+    run.logical_cell = cell->logical_cell;
     run.row = cell->row; run.col = cell->col;
     run.rowspan = cell->rs; run.colspan = cell->cs;
     run.text = cell->text; run.href = cell->href; run.flags = cell->flags;
@@ -275,6 +285,7 @@ static int table_finish(Flow *flow, Line *line) {
         cell->text = cell_text(flow, cell);
         if (!cell->text.p)
             return 0;
+        if (d->preserve_styles && !ds_style_align(d,cell->text,cell->styled.p,cell->styled.n,&cell->style)) return 0;
         if (cell->row > SIZE_MAX - cell->rs || cell->col > SIZE_MAX - cell->cs)
             goto large;
         if (cell->row + cell->rs > nr)
@@ -335,7 +346,7 @@ static int table_finish(Flow *flow, Line *line) {
             last = i;
         }
     }
-    if (meaningful == 1) {
+    if (meaningful == 1 && !d->keep_single_row_tables) {
         size_t count = 0;
         for (j = 0; j < nc; j++)
             if (grid[last * nc + j] && grid[last * nc + j]->text.n)
@@ -361,6 +372,11 @@ static int table_finish(Flow *flow, Line *line) {
         for (i = 0; i < nr * nc; i++)
             texts[i] = grid[i] ? grid[i]->text : ds_str("");
         line->matrix = (Matrix){texts, nr, nc};
+        if (d->preserve_styles) {
+            line->matrix.styles=ds_alloc(&d->arena,nr*nc*sizeof(*line->matrix.styles));
+            if (!line->matrix.styles) return 0;
+            for (i=0;i<nr*nc;i++) if (grid[i]) line->matrix.styles[i]=grid[i]->style;
+        }
     }
     return !d->arena.error[0];
 large:
@@ -376,6 +392,7 @@ static int finish_block(Flow *flow) {
     if (!flow->active)
         return 1;
     if (flow->table) {
+        line.logical_cells=flow->logical_cells;
         if (!table_finish(flow, &line))
             return 0;
     } else {
@@ -402,6 +419,7 @@ static int finish_block(Flow *flow) {
     flow->items.n = flow->cells.n = flow->parts.n = 0;
     flow->max_row = flow->max_col = 0;
     flow->has_coordinate = flow->unordered = 0;
+    flow->logical_cells=0;
     flow->active = 0;
     return !d->arena.error[0];
 }
@@ -423,6 +441,7 @@ int ds_flow_run(Document *d, const Run *run) {
         flow->block = run->block;
         flow->table = run->in_table;
     }
+    if (run->logical_cell) flow->logical_cells=1;
     return flow->table ? table_run(flow, run) : plain_run(flow, run);
 }
 int ds_flow_finish(Document *d) { return finish_block(d->flow); }
