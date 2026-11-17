@@ -98,6 +98,8 @@ static int plain_run(Flow *flow, const Run *run) {
     if (empty(&current) || same(&current, &items[flow->items.n - 1].item))
         return ds_keep_href(flow->document, &items[flow->items.n - 1].item.hrefs, run->href) &&
                append_text(flow, items + flow->items.n - 1, run->text);
+    if (flow->document->preserve_styles)
+        return add_item(flow, current);
     for (i = flow->items.n; i; i--) {
         if (!image(&items[i - 1].item) && same(&current, &items[i - 1].item)) {
             for (j = i; j < flow->items.n; j++)

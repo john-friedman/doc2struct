@@ -104,6 +104,33 @@ static int text(Writer *w, Str s) {
 static int paragraph(Writer *w, Str s) {
     return !s.n || (block(w) && text(w, s));
 }
+/* Inline markup is generated from opt-in styled runs, never read from text. */
+static int row_text(Writer *w,const Row *row) {
+    size_t i;int pending=0,wrote=0;
+    if(!row->ntext_runs)return text(w,row->text);
+    if(!row->text_runs){w->error="invalid Markdown styled runs";return 0;}
+    for(i=0;i<row->ntext_runs;i++) {
+        Str s=row->text_runs[i].text;unsigned flags=row->text_runs[i].flags&row->style_mask;
+        size_t begin=0,end=0,j,ws;
+        while(begin<s.n&&(ws=spacing(s,begin)))begin+=ws;
+        for(j=begin;j<s.n;) {
+            ws=spacing(s,j);
+            if(ws)j+=ws;else end=++j;
+        }
+        if(begin&&wrote)pending=1;
+        if(end<=begin){if(wrote)pending=1;continue;}
+        if(pending&&!literal(w," "))return 0;
+        if((flags&1)&&!literal(w,"<strong>"))return 0;
+        if((flags&2)&&!literal(w,"<em>"))return 0;
+        if((flags&4)&&!literal(w,"<u>"))return 0;
+        if(!text(w,(Str){s.p+begin,end-begin}))return 0;
+        if((flags&4)&&!literal(w,"</u>"))return 0;
+        if((flags&2)&&!literal(w,"</em>"))return 0;
+        if((flags&1)&&!literal(w,"</strong>"))return 0;
+        wrote=1;pending=end<s.n;
+    }
+    return 1;
+}
 static int matrix_valid(Writer *w, const doc2struct_matrix *m) {
     if ((m->nr && m->nc && !m->cells) || (m->nc && m->nr > SIZE_MAX / m->nc)) {
         w->error = "invalid Markdown input matrix";
@@ -250,8 +277,8 @@ char *doc2struct_convert_standardized_text_to_markdown(const Row *rows, size_t c
             if (!r->text.n) continue;
             if (!block(&w)) goto failed;
             if (r->level < 6) {
-                if (!repeat(&w, '#', r->level + 1) || !literal(&w, " ") || !text(&w, r->text)) goto failed;
-            } else if (!literal(&w, "**") || !text(&w, r->text) || !literal(&w, "**")) goto failed;
+                if (!repeat(&w, '#', r->level + 1) || !literal(&w, " ") || !row_text(&w, r)) goto failed;
+            } else if (!literal(&w, "**") || !row_text(&w, r) || !literal(&w, "**")) goto failed;
         } else if (is(r->type, "table")) {
             if (!table(&w, r, heading)) goto failed;
         } else if (is(r->type, "list")) {
@@ -260,12 +287,12 @@ char *doc2struct_convert_standardized_text_to_markdown(const Row *rows, size_t c
             if (redundant == DOC2STRUCT_REDUNDANT_OMIT || !r->text.n) continue;
             if (!block(&w)) goto failed;
             if (redundant == DOC2STRUCT_REDUNDANT_BLOCKQUOTE && !literal(&w, "> ")) goto failed;
-            if (!text(&w, r->text)) goto failed;
+            if (!row_text(&w, r)) goto failed;
         } else if (is(r->type, "image")) {
             if (!block(&w) || !literal(&w, "\\[Image")) goto failed;
             if (r->text.n && (!literal(&w, ": ") || !text(&w, r->text))) goto failed;
             if (!literal(&w, "\\]")) goto failed;
-        } else if (!paragraph(&w, r->text)) goto failed;
+        } else if (r->text.n && (!block(&w) || !row_text(&w, r))) goto failed;
     }
     while (w.size && w.data[w.size - 1] == '\n') w.size--;
     if (w.size && !literal(&w, "\n")) goto failed;

@@ -303,6 +303,9 @@ static PyObject *export_runs(PyObject *module, Document *d) {
             Py_DECREF(row);
             goto error;
         }
+        if(r->soft_break && PyDict_SetItemString(row,"soft_break",Py_True)<0) {
+            Py_DECREF(row);goto error;
+        }
         PyList_SET_ITEM(list, (Py_ssize_t)i, row);
     }
     return list;
@@ -439,6 +442,11 @@ static int import_runs(PyObject *module, Document *d, PyObject *instructions) {
             SIZE_FIELD(col, RK_COL);
         }
 #undef SIZE_FIELD
+        v = PyDict_GetItemString(o, "soft_break");
+        if(v) {
+            r->soft_break = PyObject_IsTrue(v);
+            if(r->soft_break < 0)goto error;
+        }
         r->text = string(d, get(o, keys[RK_TEXT]));
         if (!r->text.p && !PyErr_Occurred())
             r->text = str_view("");
@@ -660,6 +668,16 @@ static PyObject *row_type(ModuleState *state, Str type) {
             return Py_NewRef(state->row_types[i]);
     return unicode(type);
 }
+static PyObject *styled_runs(const Row *row) {
+    size_t i;PyObject *out=PyList_New((Py_ssize_t)row->ntext_runs);
+    if(!out)return NULL;
+    for(i=0;i<row->ntext_runs;i++) {
+        PyObject *value=Py_BuildValue("{s:N,s:I}","text",unicode(row->text_runs[i].text),"flags",row->text_runs[i].flags);
+        if(!value){Py_DECREF(out);return NULL;}
+        PyList_SET_ITEM(out,(Py_ssize_t)i,value);
+    }
+    return out;
+}
 static PyObject *export_rows(PyObject *module, Document *d, Rules *r, int with_rules) {
     ModuleState *state = conversion_state(module);
     PyObject **keys;
@@ -702,6 +720,11 @@ static PyObject *export_rows(PyObject *module, Document *d, Rules *r, int with_r
             Py_DECREF(out);
             goto error;
         }
+        if (row->style_mask) {
+            PyObject *runs=styled_runs(row);
+            if(!runs || PyDict_SetItemString(out,"runs",runs)<0){Py_XDECREF(runs);Py_DECREF(out);goto error;}
+            Py_DECREF(runs);
+        }
         for (j = 0; j < ncolumns; j++) {
             PyObject *key = PyTuple_GET_ITEM(column_keys, (Py_ssize_t)j);
             if (!set(out, key, custom(d, columns + j, row))) {
@@ -725,6 +748,7 @@ static void markdown_rows_free(Row *rows, size_t count) {
     for (i = 0; i < count; i++) {
         PyMem_Free(rows[i].matrix.cells);
         PyMem_Free(rows[i].notes);
+        PyMem_Free(rows[i].text_runs);
     }
     PyMem_Free(rows);
 }
@@ -815,6 +839,26 @@ error:
     Py_DECREF(seq);
     return 0;
 }
+static int markdown_runs(Document *d,PyObject *value,Row *r) {
+    PyObject *seq;Py_ssize_t i,n;
+    if(!value||value==Py_None)return 1;
+    if(PyUnicode_Check(value)||PyBytes_Check(value)){PyErr_SetString(PyExc_TypeError,"runs must be dictionaries");return 0;}
+    seq=PySequence_Fast(value,"runs must be a sequence");if(!seq)return 0;
+    n=PySequence_Fast_GET_SIZE(seq);
+    if((size_t)n>SIZE_MAX/sizeof(*r->text_runs)){Py_DECREF(seq);PyErr_NoMemory();return 0;}
+    r->style_mask=7;r->ntext_runs=(size_t)n;
+    if(n)r->text_runs=PyMem_Calloc((size_t)n,sizeof(*r->text_runs));
+    if(n&&!r->text_runs){Py_DECREF(seq);PyErr_NoMemory();return 0;}
+    for(i=0;i<n;i++) {
+        PyObject *item=PySequence_Fast_GET_ITEM(seq,i),*flags;
+        if(!PyDict_Check(item)){PyErr_SetString(PyExc_TypeError,"each styled run must be a dictionary");Py_DECREF(seq);return 0;}
+        r->text_runs[i].text=string(d,PyDict_GetItemString(item,"text"));
+        flags=PyDict_GetItemString(item,"flags");
+        r->text_runs[i].flags=flags?(unsigned)PyLong_AsUnsignedLong(flags)&7u:0;
+        if(PyErr_Occurred()){Py_DECREF(seq);return 0;}
+    }
+    Py_DECREF(seq);return 1;
+}
 static PyObject *markdown(PyObject *self, PyObject *args) {
     PyObject *input_rows, *seq = NULL, *result = NULL;
     const char *mode = "blockquote";
@@ -850,7 +894,7 @@ static PyObject *markdown(PyObject *self, PyObject *args) {
         r->text = string(d, PyDict_GetItemString(o, "text"));
         r->preamble = string(d, PyDict_GetItemString(o, "preamble"));
         r->postamble = string(d, PyDict_GetItemString(o, "postamble"));
-        if (PyErr_Occurred()) goto done;
+        if (PyErr_Occurred() || !markdown_runs(d, PyDict_GetItemString(o,"runs"), r)) goto done;
         if ((str_is(r->type, "table") || str_is(r->type, "list")) &&
             (!markdown_matrix(d, PyDict_GetItemString(o, "matrix"), &r->matrix, str_is(r->type, "list")) ||
              !markdown_notes(d, PyDict_GetItemString(o, "footnotes"), r))) goto done;
@@ -1081,6 +1125,17 @@ static PyObject *native_columns(PyObject *self, PyObject *capsule) {
         for (j = 0; j < 9; j++)
             if (lists[j])
                 PyList_SET_ITEM(lists[j], (Py_ssize_t)i, values[j]);
+    }
+    if (nrows && rows[0].style_mask) {
+        PyObject *values=PyList_New((Py_ssize_t)nrows);
+        if(!values)goto error;
+        for(i=0;i<nrows;i++) {
+            PyObject *value=rows[i].style_mask?styled_runs(rows+i):Py_NewRef(Py_None);
+            if(!value){Py_DECREF(values);goto error;}
+            PyList_SET_ITEM(values,(Py_ssize_t)i,value);
+        }
+        if(PyDict_SetItemString(columns,"runs",values)<0){Py_DECREF(values);goto error;}
+        Py_DECREF(values);
     }
     for (j = 0; j < ncolumns; j++) {
         const Column *c = definitions + j;

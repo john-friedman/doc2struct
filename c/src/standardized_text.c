@@ -327,7 +327,7 @@ static int group(Document *d, Vec *lines) {
                     ds_cat(&d->arena, all[items.n - 1].run.text, cur.run.text);
             } else {
                 int merged = 0;
-                for (q = items.n; q; q--)
+                for (q = d->preserve_styles ? 0 : items.n; q; q--)
                     if (!image(all + q - 1) && same(&cur, all + q - 1)) {
                         Vec parts = {0};
                         Str *p;
@@ -667,6 +667,56 @@ static int item_label(Str text) {
     }
     return count != 0;
 }
+/* Count only when a caller sets a bound; do not allocate normalized text. */
+static int heading_size(const Rules *r, const Line *line) {
+    size_t i,j,words=0;int in_word=0;
+    if(!r->heading_max_words)return 1;
+    for(i=0;i<line->nitems;i++)for(j=0;j<line->items[i].run.text.n;j++) {
+        unsigned char c=(unsigned char)line->items[i].run.text.p[j];
+        int blank=c==' '||c=='\n'||c=='\r'||c=='\t';
+        if(!blank&&!in_word&&++words>(size_t)r->heading_max_words)return 0;
+        in_word=!blank;
+    }
+    return 1;
+}
+/* Join only PDF continuations marked by geometry, before heading inference. */
+static int wrapped_lines(Document *d,const Rules *r,Vec *lines) {
+    Line *all=lines->p;Vec out={0};size_t i,j,k;
+    if(!r->join_wrapped_lines)return 1;
+    for(i=0;i<lines->n;i=j) {
+        Line line=all[i];size_t count=line.nitems;
+        j=i+1;
+        if(!line.matrix.nr&&!line.listitem&&line.nitems&&!image(line.items))
+            for(;j<lines->n;j++) {
+                Line *next=all+j,*previous=all+j-1;Str tail;
+                if(next->matrix.nr||next->listitem||!next->nitems||image(next->items)||
+                   !next->items[0].run.soft_break||previous->matrix.nr||!previous->nitems)break;
+                if(header_candidate(r,next)&&header_match(d,r,next,rule_text(d,next))>=0)break;
+                tail=ds_strip(previous->items[previous->nitems-1].run.text,1);
+                if(!tail.n||strchr(".!?;:",tail.p[tail.n-1]))break;
+                if(count>SIZE_MAX-next->nitems-1)return 0;
+                count+=next->nitems+1;
+            }
+        if(j>i+1) {
+            Item *items;size_t n=0;
+            if(count>SIZE_MAX/sizeof(Item))return 0;
+            items=ds_alloc(&d->arena,count*sizeof(Item));
+            if(!items)return 0;
+            for(k=i;k<j;k++) {
+                if(k>i) {
+                    Str *tail=&items[n-1].run.text;Str first=ds_strip(all[k].items[0].run.text,1);
+                    int hyphen=tail->n&&tail->p[tail->n-1]=='-';
+                    if(hyphen&&r->remove_wrap_hyphen&&first.n&&first.p[0]>='a'&&first.p[0]<='z')tail->n--;
+                    if(!hyphen){Item blank={0};blank.run.text=ds_str(" ");items[n++]=blank;}
+                }
+                memcpy(items+n,all[k].items,all[k].nitems*sizeof(Item));n+=all[k].nitems;
+            }
+            line.items=items;line.nitems=n;line.text_view=NULL;
+        }
+        if(!append_line(d,&out,line))return 0;
+    }
+    *lines=out;return !d->arena.error[0];
+}
 static int split(Document *d, const Rules *r, Vec *lines) {
     Vec out = {0};
     Line *all = lines->p;
@@ -690,7 +740,8 @@ static int split(Document *d, const Rules *r, Vec *lines) {
             continue;
         }
         if (!line.layout_text && !line.listitem && line.nitems > 1 && !image(line.items) && !phone_line(d, &line) &&
-            ((attrs(line.items) & ~FAKE_TABLE) ||
+            r->infer_headings && heading_size(r, &line) &&
+            ((attrs(line.items) & r->heading_styles) ||
              (dominant && line.items[0].run.has_font && line.items[0].run.font > common * 1.2))) {
             Line first = line;
             first.nitems = 1;
@@ -795,7 +846,8 @@ static int classify(Document *d, const Rules *r, Vec *lines) {
                 ln->level = -2;
                 ln->klass = ds_str("textsmall");
                 ln->attrs = 0;
-            } else if (!ln->layout_text && (big || (ln->attrs & ~FAKE_TABLE)) &&
+            } else if (r->infer_headings && heading_size(r, ln) &&
+                       !ln->layout_text && (big || (ln->attrs & r->heading_styles)) &&
                        !phone_line(d, ln) && !italic_prose(d, ln, big)) {
                 ln->level = predicted;
                 ln->klass = ds_str("predicted header");
@@ -1177,12 +1229,57 @@ static int merge_rows(Document *d, int kind) {
     d->rows.n = out;
     return !d->arena.error[0];
 }
+static size_t style_space(Str s,size_t p) {
+    size_t k;unsigned char c=(unsigned char)s.p[p];
+    if(c<128)return c==' '||c=='\n'||c=='\r'||c=='\t'||c=='\f'||c=='\v';
+    return ds_space(ds_utf8(s.p+p,s.n-p,&k))?k:0;
+}
+/* Align source items to the final plain text in one forward scan. No search,
+ * markup injection, or copies of character buffers. Fall back to plain text
+ * if a structural transformation no longer matches its retained items. */
+static int text_runs(Document *d,const Rules *rules) {
+    Row *rows=d->rows.p;size_t i,j,k;
+    if(!rules->preserve_styles)return 1;
+    for(i=0;i<d->rows.n;i++) {
+        Row *row=rows+i;size_t pos=0,start=0,n=0;unsigned flags=0,any=0;
+        doc2struct_text_run *runs;int mismatch=0;
+        if(row->matrix.nr||ds_is(row->type,"image"))continue;
+        row->style_mask=rules->preserve_styles;
+        for(j=0;j<row->nitems;j++)any|=row->items[j].run.flags;
+        if(!(any&rules->preserve_styles)||!row->text.n)continue;
+        if(row->nitems>SIZE_MAX/sizeof(*runs)-1)return 0;
+        runs=ds_alloc(&d->arena,(row->nitems+1)*sizeof(*runs));if(!runs)return 0;
+        for(j=0;j<row->nitems&&!mismatch;j++) {
+            Str source=row->items[j].run.text;unsigned next=row->items[j].run.flags&rules->preserve_styles;
+            int seen=0;
+            for(k=0;k<source.n;) {
+                size_t ws=style_space(source,k);
+                if(ws){k+=ws;continue;}
+                while(pos<row->text.n&&(ws=style_space(row->text,pos)))pos+=ws;
+                if(pos>=row->text.n||source.p[k]!=row->text.p[pos]){mismatch=1;break;}
+                if(!seen&&next!=flags) {
+                    if(pos>start)runs[n++]=(doc2struct_text_run){{row->text.p+start,pos-start},flags};
+                    start=pos;flags=next;
+                }
+                seen=1;pos++;k++;
+            }
+        }
+        while(pos<row->text.n&&style_space(row->text,pos))pos+=style_space(row->text,pos);
+        if(mismatch||pos!=row->text.n)continue;
+        if(pos>start)runs[n++]=(doc2struct_text_run){{row->text.p+start,pos-start},flags};
+        row->text_runs=runs;row->ntext_runs=n;
+    }
+    return !d->arena.error[0];
+}
 int ds_standardize(Document *d, const Rules *r) {
     Vec lines = d->flow ? d->lines : (Vec){0};
     d->retain_table_cells = r->unwrap_layout;
     d->collect_hrefs = r->collect_hrefs;
+    d->preserve_styles = r->preserve_styles;
+    d->join_wrapped_lines = r->join_wrapped_lines;
     return (d->flow || group(d, &lines)) && layout_tables(d, r, &lines) && ds_lists(d, &lines) &&
-           clean(d, r, &lines) && split(d, r, &lines) &&
+           wrapped_lines(d, r, &lines) && clean(d, r, &lines) && split(d, r, &lines) &&
            classify(d, r, &lines) && build(d, &lines) && ds_list_continuations(d, r) && ds_list_blocks(d) &&
-           merge_rows(d, MERGE_TITLES) && ds_tables(d, r) && merge_rows(d, MERGE_TEXT);
+           (!r->merge_adjacent_headings || merge_rows(d, MERGE_TITLES)) &&
+           ds_tables(d, r) && merge_rows(d, MERGE_TEXT) && text_runs(d, r);
 }

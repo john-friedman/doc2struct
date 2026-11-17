@@ -118,6 +118,16 @@ Str ds_json(Document *document,const Rules *rules,int with_rules,Arena *arena) {
            !literal(&writer,",\"preamble\":")||!string_value(&writer,row->preamble)||
            !literal(&writer,",\"footnotes\":")||!notes_value(&writer,row)||
            !literal(&writer,",\"postamble\":")||!string_value(&writer,row->postamble))return(Str){0};
+        if(row->style_mask) {
+            size_t k;
+            if(!literal(&writer,",\"runs\":["))return(Str){0};
+            for(k=0;k<row->ntext_runs;k++) {
+                if(k&&!literal(&writer,","))return(Str){0};
+                if(!literal(&writer,"{\"text\":")||!string_value(&writer,row->text_runs[k].text)||
+                   !literal(&writer,",\"flags\":")||!integer_value(&writer,row->text_runs[k].flags)||!literal(&writer,"}"))return(Str){0};
+            }
+            if(!literal(&writer,"]"))return(Str){0};
+        }
         for(j=0;j<rules->ncolumns;j++) {
             const Column *column=rules->columns+j;
             Str value={0};

@@ -112,6 +112,10 @@ typedef struct doc2struct_rules {
     Regex *annotation_exclude;
     long list_gap_rows, list_tail_rows;
     int collect_hrefs;
+    unsigned preserve_styles, heading_styles;
+    int join_wrapped_lines, remove_wrap_hyphen, infer_headings, merge_adjacent_headings;
+    long heading_max_words, formatting_max_gap;
+    int protect_years;
 } Rules;
 typedef struct doc2struct_item {
     Run run;
@@ -171,6 +175,8 @@ typedef struct doc2struct_document {
     int retain_table_cells;
     int collect_hrefs;
     int no_fonts;
+    unsigned preserve_styles;
+    int join_wrapped_lines;
     TokenBuffer tokens;
     Map styles, tags;
     pcre2_match_data *match;

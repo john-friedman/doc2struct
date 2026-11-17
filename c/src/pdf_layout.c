@@ -69,6 +69,7 @@ static int emit(PdfLayout *layout, const doc2struct_pdf_page *page, Fragment f,
         text[used]=0;
         run.text=(Str){text,used}; run.block=layout->block; run.line=layout->line;
         run.flags=g[start].flags;
+        run.soft_break=layout->soft_break;
         if(ds_upper(run.text)) run.flags|=ALL_CAPS;
         if(ds_proper(run.text)) run.flags|=PROPER_CASE;
         run.font=g[start].font*4/3; run.has_font=1;
@@ -114,7 +115,7 @@ int ds_pdf_layout(void *context, const doc2struct_pdf_page *page) {
     Vec fragments={0}, rows={0};
     Fragment *f;
     PdfRow *r;
-    size_t i=0, j, k;
+    size_t i=0, j, k, previous=SIZE_MAX;
     int ok=0;
     while(i<page->count) {
         size_t start=i++;
@@ -157,7 +158,16 @@ int ds_pdf_layout(void *context, const doc2struct_pdf_page *page) {
                     if(numeric(g,f[r[j].first+k])) table=1;
             }
         }
+        layout->soft_break=0;
+        if(layout->document->join_wrapped_lines&&!table&&!separated&&previous!=SIZE_MAX) {
+            Fragment a=f[r[previous].first],b=f[r[i].first];
+            double right=f[r[previous].end-1].right;
+            layout->soft_break=fabs(r[i].font-r[previous].font)<.5 &&
+                r[i].y-r[previous].y>0 && r[i].y-r[previous].y<=1.6*r[i].font &&
+                fabs(a.left-b.left)<=.5*r[i].font && right-a.left>.45*page->width;
+        }
         if(table) {
+            previous=SIZE_MAX;
             for(j=i;j<end;j++) {
                 for(k=0;k<columns;k++)
                     if(!emit(layout,page,f[r[j].first+k],1,j-i,k,0)) goto done;
@@ -166,6 +176,7 @@ int ds_pdf_layout(void *context, const doc2struct_pdf_page *page) {
             layout->block++;
             i=end;
         } else if(separated && columns==2 && end-i>=3) {
+            previous=SIZE_MAX;
             /* A sustained gutter without numeric cells: read each column down. */
             for(k=0;k<columns;k++) for(j=i;j<end;j++) {
                 if(!emit(layout,page,f[r[j].first+k],0,0,0,0)) goto done;
@@ -177,6 +188,7 @@ int ds_pdf_layout(void *context, const doc2struct_pdf_page *page) {
                 int space=j>r[i].first && (g[f[j].first].space_before || f[j].left-f[j-1].right>.3*r[i].font);
                 if(!emit(layout,page,f[j],0,0,0,space)) goto done;
             }
+            previous=i;
             layout->block++; layout->line++; i++;
         }
     }

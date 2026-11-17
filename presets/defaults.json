@@ -14,7 +14,11 @@
     }
   },
   "headers": [],
-  "header_styles": ["bold", "all_caps", "proper_case"],
+  "header_styles": [
+    "bold",
+    "all_caps",
+    "proper_case"
+  ],
   "remove": {
     "patterns": [
       [
@@ -64,11 +68,31 @@
     "footnote_lines": 3,
     "preamble_lines": 7,
     "postamble_lines": 7,
-    "unwrap_layout": false
+    "unwrap_layout": false,
+    "protect_years": true,
+    "formatting_max_gap": -1
   },
   "lists": {
     "max_gap_rows": 3,
     "max_tail_rows": 1
   },
-  "columns": []
+  "columns": [],
+  "text": {
+    "preserve_styles": [],
+    "join_wrapped_lines": false,
+    "wrap_hyphenation": "preserve"
+  },
+  "headings": {
+    "infer": true,
+    "styles": [
+      "bold",
+      "italic",
+      "underline",
+      "centered",
+      "all_caps",
+      "proper_case"
+    ],
+    "max_words": 0,
+    "merge_adjacent": true
+  }
 }

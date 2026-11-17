@@ -7,6 +7,8 @@ int ds_parse(Document *document, Str input, const Rules *rules) {
     input = ds_input(&document->arena, input);
     document->retain_table_cells = rules->unwrap_layout;
     document->collect_hrefs = rules->collect_hrefs;
+    document->preserve_styles = rules->preserve_styles;
+    document->join_wrapped_lines = rules->join_wrapped_lines;
     if (!input.p || !ds_flow_begin(document))
         return 0;
     normalizer = ds_normalizer(document, rules->html);

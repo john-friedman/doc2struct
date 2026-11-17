@@ -293,7 +293,8 @@ static int clean_table(Document *d, const Rules *r, Row *row, Vec *scratch) {
             for (j = 0; j < m->nc; j++) {
                 Str t = m->cells[i * m->nc + j];
                 if ((table.facts[i * m->nc + j] & CELL_PREFIX) && !(dash(t) && data_columns[j]))
-                    for (k = j + 1; k < m->nc; k++)
+                    for (k = j + 1; k < m->nc &&
+                         (r->formatting_max_gap < 0 || k-j-1 <= (size_t)r->formatting_max_gap); k++)
                         if (m->cells[i * m->nc + k].n) {
                             Str next = m->cells[i * m->nc + k];
                             if (table.facts[i * m->nc + k] & (CELL_NUMERIC | CELL_PREFIX)) {
@@ -310,9 +311,12 @@ static int clean_table(Document *d, const Rules *r, Row *row, Vec *scratch) {
             for (j = 0; j < m->nc; j++) {
                 Str t = m->cells[i * m->nc + j];
                 if ((table.facts[i * m->nc + j] & CELL_SUFFIX) && !(dash(t) && data_columns[j]))
-                    for (k = j; k; k--)
+                    for (k = j; k &&
+                         (r->formatting_max_gap < 0 || j-k <= (size_t)r->formatting_max_gap); k--)
                         if (m->cells[i * m->nc + k - 1].n) {
-                            if (table.facts[i * m->nc + k - 1] & CELL_NUMERIC) {
+                            /* Keep year headers separate from following suffix columns. */
+                            if ((table.facts[i * m->nc + k - 1] & CELL_NUMERIC) &&
+                                (!r->protect_years || !(table.facts[i * m->nc + k - 1] & CELL_YEAR))) {
                                 clear_copies(&table, i, j);
                                 clear_copies(&table, i, k - 1);
                                 replace_cell(&table, i * m->nc + k - 1,

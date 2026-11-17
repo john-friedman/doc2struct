@@ -104,7 +104,7 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
     static const char *const sources[]={"text","header_title","href","src","font_size","indent","flags",NULL};
     static const char *const dtypes[]={"str","int","bool","list",NULL};
     static const char *const which[]={"first","last","all",NULL};
-    static const char *const reserved[]={"id","level","type","text","matrix","cleaned","preamble","footnotes","postamble",NULL};
+    static const char *const reserved[]={"id","level","type","text","matrix","cleaned","preamble","footnotes","postamble","runs",NULL};
     static const char *const adapters[]={"html","text","partialsgml",NULL};
     static const char *const html_fields[]={"hide_hidden_attr","hide_visibility","max_span",NULL};
     Rules *r=calloc(1,sizeof(*r));JValue *v,*c,*sub,*x,*adapter;size_t i,j;long n;
@@ -164,6 +164,28 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
         }
         if(r->arena.error[0])goto fail;
     }
+    sub=field(&r->arena,root,"text",J_OBJECT,0);if(!sub)goto fail;
+    v=field(&r->arena,sub,"preserve_styles",J_ARRAY,0);if(!v)goto fail;
+    for(c=v->child;c;c=c->next) {
+        unsigned bit=ds_style_bit(text(r,c));
+        if(!bit||(bit&~7u)){bad(&r->arena,"preserve_styles accepts bold, italic and underline");goto fail;}
+        r->preserve_styles|=bit;
+    }
+    x=field(&r->arena,sub,"join_wrapped_lines",J_BOOL,0);if(!x)goto fail;r->join_wrapped_lines=x->boolean;
+    x=field(&r->arena,sub,"wrap_hyphenation",J_STRING,0);if(!x)goto fail;
+    if(!ds_is(x->text,"preserve")&&!ds_is(x->text,"remove")){bad(&r->arena,"wrap_hyphenation must be preserve or remove");goto fail;}
+    r->remove_wrap_hyphen=ds_is(x->text,"remove");
+    sub=field(&r->arena,root,"headings",J_OBJECT,0);if(!sub)goto fail;
+    x=field(&r->arena,sub,"infer",J_BOOL,0);if(!x)goto fail;r->infer_headings=x->boolean;
+    x=field(&r->arena,sub,"merge_adjacent",J_BOOL,0);if(!x)goto fail;r->merge_adjacent_headings=x->boolean;
+    r->heading_max_words=number(r,field(&r->arena,sub,"max_words",J_NUMBER,0));
+    if(r->heading_max_words<0){bad(&r->arena,"headings.max_words must be nonnegative");goto fail;}
+    v=field(&r->arena,sub,"styles",J_ARRAY,0);if(!v)goto fail;
+    for(c=v->child;c;c=c->next) {
+        unsigned bit=ds_style_bit(text(r,c));
+        if(!bit||bit==64){bad(&r->arena,"invalid inferred heading style");goto fail;}
+        r->heading_styles|=bit;
+    }
     sub=field(&r->arena,root,"remove",J_OBJECT,0);if(!sub)goto fail;
     x=ds_config_get(sub,"repeat_threshold");
     r->repeat_threshold=x&&x->type==J_NULL?0:number(r,x);
@@ -183,7 +205,9 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
     sub=field(&r->arena,root,"tables",J_OBJECT,0);if(!sub)goto fail;
 #define BOOL(name) x=field(&r->arena,sub,#name,J_BOOL,0);if(!x)goto fail;r->name=x->boolean
 #define NUMBER(name) r->name=number(r,field(&r->arena,sub,#name,J_NUMBER,0))
-    BOOL(single_row_to_text);BOOL(title_from_section);BOOL(unwrap_layout);
+    BOOL(single_row_to_text);BOOL(title_from_section);BOOL(unwrap_layout);BOOL(protect_years);
+    NUMBER(formatting_max_gap);
+    if(r->formatting_max_gap < -1){bad(&r->arena,"formatting_max_gap must be -1 or nonnegative");goto fail;}
     NUMBER(footnote_lines);NUMBER(preamble_lines);NUMBER(postamble_lines);
 #undef BOOL
 #undef NUMBER
@@ -287,7 +311,7 @@ char *doc2struct_rules_merge_json(Str base_json,Str extra_json,size_t *size,doc2
     Arena a={0};JValue *base,*extra,*defaults,*b,*x,*tail,*adapter,*setting,*default_adapter;Rules *r=NULL;
     Str json={0};char *out=NULL;size_t i;
     static const char *const append[]={"headers","columns"};
-    static const char *const replace[]={"remove","tables","lists","header_styles"};
+    static const char *const replace[]={"remove","tables","lists","header_styles","text","headings"};
     if(size)*size=0;if(error)error->message[0]=0;
     base=resolved(&a,base_json,0);extra=resolved(&a,extra_json,0);
     defaults=ds_config_parse(&a,doc2struct_defaults_json());
@@ -312,7 +336,7 @@ char *doc2struct_rules_merge_json(Str base_json,Str extra_json,size_t *size,doc2
         else {for(tail=b->child;tail->next;tail=tail->next){}tail->next=x->child;}
         b->count+=x->count;
     }
-    for(i=0;i<4;i++) {
+    for(i=0;i<sizeof(replace)/sizeof(replace[0]);i++) {
         b=ds_config_get(base,replace[i]);x=ds_config_get(extra,replace[i]);
         if(!ds_config_equal(x,ds_config_get(defaults,replace[i]))) {
             JValue *next=b->next;*b=*x;b->next=next;

@@ -332,9 +332,12 @@ static Document *parse_pdf(ParserContext *parser, Str input, const Rules *rules,
     layout.stream = rules != NULL;
     layout.pool.limit = DS_DEFAULT_CACHE_SIZE;
     layout.scratch.pool = &layout.pool;
+    document->join_wrapped_lines = rules ? rules->join_wrapped_lines : 1;
     if (rules) {
         document->retain_table_cells = rules->unwrap_layout;
         document->collect_hrefs = rules->collect_hrefs;
+        document->preserve_styles = rules->preserve_styles;
+        document->join_wrapped_lines = rules->join_wrapped_lines;
     }
     ok = (!rules || ds_flow_begin(document)) &&
          doc2struct_pdf_visit(input,ds_pdf_layout,&layout,error) &&

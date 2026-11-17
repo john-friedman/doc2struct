@@ -12,7 +12,11 @@ from .defaults import (DEFAULT_HEADER_STYLES, DEFAULT_FOOTNOTE_LINES, DEFAULT_FO
                        DEFAULT_TITLE_FROM_SECTION, DEFAULT_UNWRAP_LAYOUT, DEFAULT_ANNOTATION_EXCLUDE_REGEX,
                        DEFAULT_LIST_GAP_ROWS, DEFAULT_LIST_TAIL_ROWS, DEFAULT_HIDE_HIDDEN_ATTR,
                        DEFAULT_HIDE_VISIBILITY, DEFAULT_MAX_SPAN, DEFAULT_TEXT_TAB_SIZE,
-                       DEFAULT_PARTIALSGML_TAB_SIZE)
+                       DEFAULT_PARTIALSGML_TAB_SIZE, DEFAULT_PRESERVE_STYLES,
+                       DEFAULT_JOIN_WRAPPED_LINES, DEFAULT_WRAP_HYPHENATION,
+                       DEFAULT_INFER_HEADINGS, DEFAULT_INFERRED_HEADING_STYLES,
+                       DEFAULT_HEADING_MAX_WORDS, DEFAULT_MERGE_ADJACENT_HEADINGS,
+                       DEFAULT_PROTECT_YEARS, DEFAULT_FORMATTING_MAX_GAP)
 
 
 # ---------------------------------------------------------------------------------------------- adapters
@@ -60,6 +64,42 @@ class AdapterRules:
 
 
 # ------------------------------------------------------------------------------------ standardized text
+@dataclass(frozen=True)
+class TextRules:
+    preserve_styles: Tuple[str, ...] = DEFAULT_PRESERVE_STYLES
+    join_wrapped_lines: bool = DEFAULT_JOIN_WRAPPED_LINES
+    wrap_hyphenation: str = DEFAULT_WRAP_HYPHENATION
+
+    def to_dict(self):
+        return {'preserve_styles': list(self.preserve_styles), 'join_wrapped_lines': self.join_wrapped_lines,
+                'wrap_hyphenation': self.wrap_hyphenation}
+
+    @classmethod
+    def from_dict(cls, d):
+        base = cls()
+        return cls(tuple(d.get('preserve_styles', base.preserve_styles)),
+                   d.get('join_wrapped_lines', base.join_wrapped_lines),
+                   d.get('wrap_hyphenation', base.wrap_hyphenation))
+
+
+@dataclass(frozen=True)
+class HeadingRules:
+    infer: bool = DEFAULT_INFER_HEADINGS
+    styles: Tuple[str, ...] = DEFAULT_INFERRED_HEADING_STYLES
+    max_words: int = DEFAULT_HEADING_MAX_WORDS
+    merge_adjacent: bool = DEFAULT_MERGE_ADJACENT_HEADINGS
+
+    def to_dict(self):
+        return {'infer': self.infer, 'styles': list(self.styles), 'max_words': self.max_words,
+                'merge_adjacent': self.merge_adjacent}
+
+    @classmethod
+    def from_dict(cls, d):
+        base = cls()
+        return cls(d.get('infer', base.infer), tuple(d.get('styles', base.styles)),
+                   d.get('max_words', base.max_words), d.get('merge_adjacent', base.merge_adjacent))
+
+
 @dataclass(frozen=True)
 class RemoveRules:
     """Legacy configuration name: matches are preserved as redundant rows.
@@ -114,8 +154,12 @@ class TableRules:
     unwrap_layout: bool = DEFAULT_UNWRAP_LAYOUT  # unwrap prose tables containing explicit section headings
     annotation_exclude_regex: Optional[str] = DEFAULT_ANNOTATION_EXCLUDE_REGEX  # keep matching contact lines as text
 
+    protect_years: bool = DEFAULT_PROTECT_YEARS
+    formatting_max_gap: int = DEFAULT_FORMATTING_MAX_GAP  # -1 is unlimited; otherwise blank cells
+
     def to_dict(self):
-        return {'steps': list(self.steps), 'single_row_to_text': self.single_row_to_text,
+        return {'steps': list(self.steps), 'protect_years': self.protect_years,
+                'formatting_max_gap': self.formatting_max_gap, 'single_row_to_text': self.single_row_to_text,
                 'title_from_section': self.title_from_section, 'footnote_regex': self.footnote_regex,
                 'footnote_lines': self.footnote_lines, 'preamble_lines': self.preamble_lines,
                 'postamble_lines': self.postamble_lines, 'unwrap_layout': self.unwrap_layout,
@@ -125,6 +169,8 @@ class TableRules:
     def from_dict(cls, d):
         base = cls()
         return cls(steps=tuple(d.get('steps', base.steps)),
+                   protect_years=d.get('protect_years', base.protect_years),
+                   formatting_max_gap=d.get('formatting_max_gap', base.formatting_max_gap),
                    single_row_to_text=d.get('single_row_to_text', base.single_row_to_text),
                    title_from_section=d.get('title_from_section', base.title_from_section),
                    footnote_regex=d.get('footnote_regex', base.footnote_regex),
@@ -196,13 +242,15 @@ class Rules:
     lists: ListRules = field(default_factory=ListRules)
     header_styles: Tuple[str, ...] = DEFAULT_HEADER_STYLES  # any listed style; empty disables the shared gate
     adapters: AdapterRules = field(default_factory=AdapterRules)
+    text: TextRules = field(default_factory=TextRules)
+    headings: HeadingRules = field(default_factory=HeadingRules)
 
     def validate(self):
         _native.prepare_rules(json.dumps(self.to_dict(), ensure_ascii=False, allow_nan=False))
         return self
 
     def to_dict(self):
-        return {'name': self.name, 'headers': [h.to_dict() for h in self.headers], 'remove': self.remove.to_dict(),
+        return {'name': self.name, 'text': self.text.to_dict(), 'headings': self.headings.to_dict(), 'headers': [h.to_dict() for h in self.headers], 'remove': self.remove.to_dict(),
                 'tables': self.tables.to_dict(), 'columns': [c.to_dict() for c in self.columns],
                 'lists': self.lists.to_dict(), 'header_styles': list(self.header_styles),
                 'adapters': self.adapters.to_dict()}
@@ -210,6 +258,8 @@ class Rules:
     @classmethod
     def from_dict(cls, d):
         return cls(name=d.get('name', 'custom'),
+                   text=TextRules.from_dict(d.get('text', {})),
+                   headings=HeadingRules.from_dict(d.get('headings', {})),
                    headers=[HeaderRule.from_dict(h) for h in d.get('headers', ())],
                    remove=RemoveRules.from_dict(d.get('remove', {})),
                    tables=TableRules.from_dict(d.get('tables', {})),

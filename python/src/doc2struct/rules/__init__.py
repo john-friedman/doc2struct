@@ -27,7 +27,7 @@ from typing import Optional, Union
 from .. import _native
 
 from .types import (AdapterRules, HTMLAdapterRules, TextAdapterRules, CustomColumn, HeaderRule,
-                    ListRules, RemoveRules, Rules, TableRules)
+                    ListRules, RemoveRules, Rules, TableRules, TextRules, HeadingRules)
 
 _PACKS = None
 
@@ -101,5 +101,5 @@ def load_rules(source: Union[str, Path, dict, Rules], extend: Optional[Union[str
     return rules
 
 
-__all__ = ['load_rules', 'merge', 'list_namespaces', 'list_document_types', 'Rules', 'HeaderRule', 'RemoveRules', 'TableRules', 'ListRules',
+__all__ = ['load_rules', 'merge', 'list_namespaces', 'list_document_types', 'Rules', 'HeaderRule', 'RemoveRules', 'TableRules', 'TextRules', 'HeadingRules', 'ListRules',
            'CustomColumn', 'AdapterRules', 'HTMLAdapterRules', 'TextAdapterRules']

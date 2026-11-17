@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define DOC2STRUCT_VERSION "0.1.4"
+#define DOC2STRUCT_VERSION "0.1.6"
 #define DOC2STRUCT_DEFAULT_CACHE_SIZE ((size_t)8 * 1024 * 1024)
 typedef struct doc2struct_rules doc2struct_rules;
 typedef struct doc2struct_parser doc2struct_parser;
@@ -38,9 +38,13 @@ typedef struct {
     unsigned flags;
     double font, indent;
     int in_table, has_font, has_indent;
+    int soft_break; /* PDF geometry identifies a possible wrapped continuation. */
 } doc2struct_run;
 typedef struct { doc2struct_string *cells; size_t nr, nc; } doc2struct_matrix;
 typedef struct { doc2struct_string id, text; } doc2struct_note;
+
+/* Optional styled slices of plain row text; matrix cells remain strings. */
+typedef struct { doc2struct_string text; unsigned flags; } doc2struct_text_run;
 typedef struct {
     size_t id, level;
     doc2struct_string type, klass, title, text, preamble, postamble;
@@ -50,6 +54,9 @@ typedef struct {
     size_t nitems;
     doc2struct_note *notes;
     size_t nnotes;
+    unsigned style_mask;
+    doc2struct_text_run *text_runs;
+    size_t ntext_runs;
 } doc2struct_row;
 typedef struct {
     doc2struct_string name, source, dtype, which;

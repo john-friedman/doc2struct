@@ -13,6 +13,28 @@ DEFAULT_HEADER_STYLES = tuple(_DEFAULTS['header_styles'])
 _REMOVE = _DEFAULTS['remove']
 _TABLES = _DEFAULTS['tables']
 _LISTS = _DEFAULTS['lists']
+_TEXT = _DEFAULTS['text']
+_HEADINGS = _DEFAULTS['headings']
+DEFAULT_PRESERVE_STYLES = tuple(_TEXT['preserve_styles'])
+DEFAULT_JOIN_WRAPPED_LINES = _TEXT['join_wrapped_lines']
+DEFAULT_WRAP_HYPHENATION = _TEXT['wrap_hyphenation']
+DEFAULT_INFER_HEADINGS = _HEADINGS['infer']
+DEFAULT_INFERRED_HEADING_STYLES = tuple(_HEADINGS['styles'])
+DEFAULT_HEADING_MAX_WORDS = _HEADINGS['max_words']
+DEFAULT_MERGE_ADJACENT_HEADINGS = _HEADINGS['merge_adjacent']
+DEFAULT_PROTECT_YEARS = _TABLES['protect_years']
+DEFAULT_FORMATTING_MAX_GAP = _TABLES['formatting_max_gap']
+_TEXT = _DEFAULTS['text']
+_HEADINGS = _DEFAULTS['headings']
+DEFAULT_PRESERVE_STYLES = tuple(_TEXT['preserve_styles'])
+DEFAULT_JOIN_WRAPPED_LINES = _TEXT['join_wrapped_lines']
+DEFAULT_WRAP_HYPHENATION = _TEXT['wrap_hyphenation']
+DEFAULT_INFER_HEADINGS = _HEADINGS['infer']
+DEFAULT_INFERRED_HEADING_STYLES = tuple(_HEADINGS['styles'])
+DEFAULT_HEADING_MAX_WORDS = _HEADINGS['max_words']
+DEFAULT_MERGE_ADJACENT_HEADINGS = _HEADINGS['merge_adjacent']
+DEFAULT_PROTECT_YEARS = _TABLES['protect_years']
+DEFAULT_FORMATTING_MAX_GAP = _TABLES['formatting_max_gap']
 DEFAULT_LIST_GAP_ROWS = _LISTS['max_gap_rows']
 DEFAULT_LIST_TAIL_ROWS = _LISTS['max_tail_rows']
 STANDARD_REMOVE = tuple(tuple(p) for p in _REMOVE['patterns'])
@@ -33,4 +55,4 @@ KNOWN_STYLES = ('bold', 'italic', 'underline', 'centered', 'all_caps', 'proper_c
 
 # columns every output already has; custom columns may not reuse them
 RESERVED_COLUMNS = ('id', 'level', 'type', 'text', 'matrix', 'cleaned', 'preamble',
-                    'footnotes', 'postamble')
+                    'footnotes', 'postamble', 'runs')
