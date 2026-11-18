@@ -181,7 +181,10 @@ static int table_run(Flow *flow, const Run *run) {
     if (flow->cells.n) {
         cell = cells + flow->cells.n - 1;
         if (cell->row != run->row || cell->col != run->col) {
-            if (run->row < cell->row || (run->row == cell->row && run->col < cell->col)) {
+            /* Wrapped rows can introduce an earlier column after later ones.
+             * Once insertion order differs from coordinate order, the last
+             * allocated cell is no longer an upper bound for this lookup. */
+            if (flow->unordered || run->row < cell->row || (run->row == cell->row && run->col < cell->col)) {
                 for (i = 0; i < flow->cells.n; i++)
                     if (cells[i].row == run->row && cells[i].col == run->col)
                         break;

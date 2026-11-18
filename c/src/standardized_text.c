@@ -693,19 +693,26 @@ static int heading_size(const Rules *r, const Line *line) {
     }
     return 1;
 }
-/* Join only PDF continuations marked by geometry, before heading inference. */
+static int protected_wrap_heading(Document *d,const Rules *r,Line *line) {
+    if(!r->protect_wrapped_headings || !line->nitems || line->layout_text)return 0;
+    if(header_candidate(r,line) && header_match(d,r,line,rule_text(d,line))>=0)return 1;
+    return r->infer_headings && heading_size(r,line) &&
+        (attrs(line->items)&r->heading_styles) && !phone_line(d,line);
+}
+/* Join adapter continuations marked by geometry, before heading inference. */
 static int wrapped_lines(Document *d,const Rules *r,Vec *lines) {
     Line *all=lines->p;Vec out={0};size_t i,j,k;
     if(!r->join_wrapped_lines)return 1;
     for(i=0;i<lines->n;i=j) {
         Line line=all[i];size_t count=line.nitems;
         j=i+1;
-        if(!line.matrix.nr&&!line.listitem&&line.nitems&&!image(line.items))
+        if(!line.matrix.nr&&!line.listitem&&line.nitems&&!image(line.items)&&!protected_wrap_heading(d,r,&line))
             for(;j<lines->n;j++) {
                 Line *next=all+j,*previous=all+j-1;Str tail;
                 if(next->matrix.nr||next->listitem||!next->nitems||image(next->items)||
                    !next->items[0].run.soft_break||previous->matrix.nr||!previous->nitems)break;
                 if(header_candidate(r,next)&&header_match(d,r,next,rule_text(d,next))>=0)break;
+                if(protected_wrap_heading(d,r,next))break;
                 tail=ds_strip(previous->items[previous->nitems-1].run.text,1);
                 if(!tail.n||strchr(".!?;:",tail.p[tail.n-1]))break;
                 if(count>SIZE_MAX-next->nitems-1)return 0;
@@ -734,8 +741,8 @@ static int wrapped_lines(Document *d,const Rules *r,Vec *lines) {
 static int split(Document *d, const Rules *r, Vec *lines) {
     Vec out = {0};
     Line *all = lines->p;
-    int dominant;
-    double common = font_stats(d, lines, &dominant);
+    int dominant = 0;
+    double common = r->heading_use_font_size ? font_stats(d, lines, &dominant) : 0;
     size_t i;
     for (i = 0; i < lines->n; i++) {
         Line line = all[i];
@@ -802,8 +809,8 @@ static int italic_prose(Document *d, Line *line, int big) {
 }
 static int classify(Document *d, const Rules *r, Vec *lines) {
     Line *all = lines->p;
-    int dominant, predicted = 0, section = -1, attr_levels[128], next = 0;
-    double common = font_stats(d, lines, &dominant);
+    int dominant = 0, predicted = 0, section = -1, attr_levels[128], next = 0;
+    double common = r->heading_use_font_size ? font_stats(d, lines, &dominant) : 0;
     size_t i, j;
     for (i = 0; i < 128; i++)
         attr_levels[i] = -1;
@@ -1305,6 +1312,87 @@ static int text_runs(Document *d,const Rules *rules) {
     }
     return !d->arena.error[0];
 }
+static Str token_mapping(const TokenNormalization *rule,uint32_t cp,Str original) {
+    size_t i;for(i=0;i<rule->map_count;i++)if(rule->map[i].from==cp)return rule->map[i].to;
+    return original;
+}
+static Str normalize_token(Document *d,const TokenNormalization *rule,Str token) {
+    size_t i=0,step,count=0,digits=0,changes=0,bytes=0,pos=0;char *output;
+    while(i<token.n) {
+        uint32_t cp=ds_utf8(token.p+i,token.n-i,&step);Str original,mapped;
+        if(!step)return token;
+        original=(Str){token.p+i,step};mapped=token_mapping(rule,cp,original);
+        count++;digits+=cp>='0'&&cp<='9';changes+=!ds_eq(original,mapped);
+        if(mapped.n>SIZE_MAX-bytes-1){snprintf(d->arena.error,sizeof(d->arena.error),"normalized token too large");return token;}
+        bytes+=mapped.n;i+=step;
+    }
+    if(!changes || changes>rule->maximum_changes || digits<count*rule->minimum_digit_fraction)return token;
+    output=ds_alloc_uninit(&d->arena,bytes+1);if(!output)return (Str){0};
+    for(i=0;i<token.n;i+=step) {
+        uint32_t cp=ds_utf8(token.p+i,token.n-i,&step);
+        Str mapped=token_mapping(rule,cp,(Str){token.p+i,step});
+        memcpy(output+pos,mapped.p,mapped.n);pos+=mapped.n;
+    }
+    output[pos]=0;
+    /* A required format must consume the entire candidate, even when the
+     * caller omitted regex anchors. Never accept a plausible substring. */
+    if(ds_match(d,rule->require_result,(Str){output,pos},0) && ds_group(d,(Str){output,pos},0).n==pos)
+        return (Str){output,pos};
+    return token;
+}
+static int token_separator(uint32_t cp) {
+    return ds_space(cp);
+}
+static Str normalize_text_tokens(Document *d,const Rules *rules,Str text) {
+    size_t i=0,start,stop,step,kept=0,k;Vec parts={0};
+    while(i<text.n) {
+        uint32_t cp=ds_utf8(text.p+i,text.n-i,&step);Str token,before,*part;
+        if(!step)break;
+        if(token_separator(cp)){i+=step;continue;}
+        start=i;
+        do {i+=step;if(i==text.n)break;cp=ds_utf8(text.p+i,text.n-i,&step);} while(step&&!token_separator(cp));
+        stop=i;
+        /* Keep internal punctuation together: a numeric-looking URL query or
+         * identifier fragment must not masquerade as a standalone number. */
+        while(start<stop && strchr(".,;!?()[]{}<>\"'",(unsigned char)text.p[start]))start++;
+        while(stop>start && strchr(".,;!?()[]{}<>\"'",(unsigned char)text.p[stop-1]))stop--;
+        token=before=(Str){text.p+start,stop-start};
+        for(k=0;k<rules->ntoken_normalizations;k++)token=normalize_token(d,rules->token_normalizations+k,token);
+        if(!ds_eq(before,token)) {
+            part=ds_push(&d->arena,&parts,sizeof(Str));if(!part)return (Str){0};*part=(Str){text.p+kept,start-kept};
+            part=ds_push(&d->arena,&parts,sizeof(Str));if(!part)return (Str){0};*part=token;kept=stop;
+        }
+        if(d->arena.error[0])return (Str){0};
+    }
+    if(!parts.n)return text;
+    {Str *part=ds_push(&d->arena,&parts,sizeof(Str));if(!part)return (Str){0};*part=(Str){text.p+kept,text.n-kept};}
+    return ds_join(&d->arena,parts.p,parts.n,ds_str(""));
+}
+static int normalize_tokens(Document *d,const Rules *rules,Vec *lines) {
+    Line *all=lines->p;size_t i,j,k;
+    if(!rules->ntoken_normalizations)return 1;
+    for(i=0;i<lines->n;i++) {
+        Line *line=all+i;line->text_view=NULL;
+        for(j=0;j<line->nitems;j++) {
+            Item *item=line->items+j;
+            if(!image(item)) {item->run.text=normalize_text_tokens(d,rules,item->run.text);item->casing=0;}
+        }
+        for(j=0;j<line->matrix.nr*line->matrix.nc;j++) {
+            line->matrix.cells[j]=normalize_text_tokens(d,rules,line->matrix.cells[j]);
+            if(line->matrix.styles) {
+                doc2struct_cell_style *style=line->matrix.styles+j;
+                if(style->count) {
+                    doc2struct_text_run *copy;
+                    if(style->count>SIZE_MAX/sizeof(*copy))return 0;
+                    copy=ds_alloc_uninit(&d->arena,style->count*sizeof(*copy));if(!copy)return 0;
+                    memcpy(copy,style->runs,style->count*sizeof(*copy));style->runs=copy;
+                }
+                for(k=0;k<style->count;k++)style->runs[k].text=normalize_text_tokens(d,rules,style->runs[k].text);
+            }
+        }
+    }
+    return !d->arena.error[0];
+}
 int ds_standardize(Document *d, const Rules *r) {
     Vec lines = d->flow ? d->lines : (Vec){0};
     d->retain_table_cells = r->unwrap_layout;
@@ -1312,9 +1400,9 @@ int ds_standardize(Document *d, const Rules *r) {
     d->collect_hrefs = r->collect_hrefs;
     d->preserve_styles = r->preserve_styles;
     d->join_wrapped_lines = r->join_wrapped_lines;
-    return (d->flow || group(d, &lines)) && layout_tables(d, r, &lines) && ds_lists(d, &lines) &&
+    return (d->flow || group(d, &lines)) && normalize_tokens(d,r,&lines) && layout_tables(d, r, &lines) && ds_lists(d, &lines) &&
            wrapped_lines(d, r, &lines) && clean(d, r, &lines) && split(d, r, &lines) &&
            classify(d, r, &lines) && build(d, &lines) && ds_list_continuations(d, r) && ds_list_blocks(d) &&
            (!r->merge_adjacent_headings || merge_rows(d, MERGE_TITLES)) &&
-           ds_tables(d, r) && merge_rows(d, MERGE_TEXT) && text_runs(d, r);
+           ds_tables(d, r) && (!r->merge_adjacent_text || merge_rows(d, MERGE_TEXT)) && text_runs(d, r);
 }

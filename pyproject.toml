@@ -30,7 +30,7 @@ cmake.build-type = "Release"
 wheel.packages = ["python/src/doc2struct"]
 wheel.exclude = ["**/__pycache__/**"]
 install.components = ["python"]
-sdist.include = ["/CMakeLists.txt", "/LICENSE", "/c/**", "/presets/*.json", "/python/native/*.c", "/python/src/doc2struct/**/*.py", "/build_scripts/*.py"]
+sdist.include = ["/CMakeLists.txt", "/LICENSE", "/c/**", "/presets/*.json", "/python/native/*.c", "/python/src/doc2struct/**/*.py", "/build_scripts/build_pdfium.py", "/build_scripts/generate_presets.py", "/build_scripts/package_native.py", "/build_scripts/repair_wheel.py", "/build_scripts/smoke_release.py", "/build_scripts/validate_pdfium.py"]
 sdist.exclude = ["build/**", "dist/**", "python/_native_source/**", "python/build/**", "python/src/doc2struct/_pdfium/**", "**/__pycache__/**", "*.egg-info/**", "testing/**", "data/**", "image.png"]
 
 [tool.scikit-build.cmake.define]

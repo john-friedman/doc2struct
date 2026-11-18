@@ -13,12 +13,13 @@ from .defaults import (DEFAULT_HEADER_STYLES, DEFAULT_FOOTNOTE_LINES, DEFAULT_FO
                        DEFAULT_LIST_GAP_ROWS, DEFAULT_LIST_TAIL_ROWS, DEFAULT_HIDE_HIDDEN_ATTR,
                        DEFAULT_HIDE_VISIBILITY, DEFAULT_MAX_SPAN, DEFAULT_TEXT_TAB_SIZE,
                        DEFAULT_PARTIALSGML_TAB_SIZE, DEFAULT_PRESERVE_STYLES,
-                       DEFAULT_JOIN_WRAPPED_LINES, DEFAULT_WRAP_HYPHENATION,
+                       DEFAULT_JOIN_WRAPPED_LINES, DEFAULT_WRAP_HYPHENATION, DEFAULT_PROTECT_WRAPPED_HEADINGS,
                        DEFAULT_INFER_HEADINGS, DEFAULT_INFERRED_HEADING_STYLES,
                        DEFAULT_HEADING_MAX_WORDS, DEFAULT_MERGE_ADJACENT_HEADINGS,
+                       DEFAULT_HEADING_USE_FONT_SIZE,
                        DEFAULT_PROTECT_YEARS, DEFAULT_FORMATTING_MAX_GAP,
                        DEFAULT_PDF_CLIP_TO_PAGE, DEFAULT_PDF_DETECT_DECORATIONS,
-                       DEFAULT_PDF_LAYOUT, DEFAULT_PDF_FONT_RECOVERY)
+                       DEFAULT_PDF_LAYOUT, DEFAULT_PDF_FONT_RECOVERY, DEFAULT_BB_ADAPTER)
 
 
 # ---------------------------------------------------------------------------------------------- adapters
@@ -65,41 +66,114 @@ class PDFAdapterRules:
 
 
 @dataclass(frozen=True)
+class BBAdapterRules:
+    """Prose/table policy; widths and gaps use observed line heights.
+
+    table_lookahead (1..128 rows) extends the local grid only when intervening
+    rows support it at table_extension_min_fraction (0..1). merge_table_headers
+    joins aligned textual header fragments within table_header_rows (1..16).
+    continuation_font_tolerance is relative to the larger neighboring font.
+    table_min_column_rows requires repeated aligned cells in each proposed
+    column before accepting a grid; 1 preserves the original vote policy.
+    Higher values can reject sparse tables as well as incidental word gaps.
+    protect_table_section_labels keeps a standalone label above multiple
+    column headings separate from the preceding row's wrapped label.
+    word_gap_height_ratio limits word-to-cell grouping by median line height;
+    numeric pairs retain their stricter gap check.
+    table_header_gap_height_ratio
+    separates an all-text heading row after numeric data when its vertical gap
+    reaches that multiple of the larger neighboring line height. Ordinary
+    data-row spacing retains the adapter's original tolerance.
+    """
+    reject_prose_tables: bool = DEFAULT_BB_ADAPTER.get('reject_prose_tables', False)
+    prose_min_letters: int = DEFAULT_BB_ADAPTER.get('prose_min_letters', 20)
+    prose_min_words: int = DEFAULT_BB_ADAPTER.get('prose_min_words', 4)
+    prose_min_lines: int = DEFAULT_BB_ADAPTER.get('prose_min_lines', 2)
+    prose_min_width_heights: float = DEFAULT_BB_ADAPTER.get('prose_min_width_heights', 8)
+    prose_min_mixed_case_fraction: float = DEFAULT_BB_ADAPTER.get('prose_min_mixed_case_fraction', 0.5)
+    protect_compact_codes: bool = DEFAULT_BB_ADAPTER.get('protect_compact_codes', True)
+    code_max_words: int = DEFAULT_BB_ADAPTER.get('code_max_words', 3)
+    code_max_width_heights: float = DEFAULT_BB_ADAPTER.get('code_max_width_heights', 6)
+    code_min_rows: int = DEFAULT_BB_ADAPTER.get('code_min_rows', 3)
+    code_min_fraction: float = DEFAULT_BB_ADAPTER.get('code_min_fraction', 0.5)
+    protect_repeated_entries: bool = DEFAULT_BB_ADAPTER.get('protect_repeated_entries', True)
+    repeat_min_count: int = DEFAULT_BB_ADAPTER.get('repeat_min_count', 2)
+    repeat_min_fraction: float = DEFAULT_BB_ADAPTER.get('repeat_min_fraction', 0.5)
+    merge_table_headers: bool = DEFAULT_BB_ADAPTER.get('merge_table_headers', False)
+    protect_table_section_labels: bool = DEFAULT_BB_ADAPTER.get('protect_table_section_labels', False)
+    table_lookahead: int = DEFAULT_BB_ADAPTER.get('table_lookahead', 8)
+    table_min_column_rows: int = DEFAULT_BB_ADAPTER.get('table_min_column_rows', 1)
+    table_header_rows: int = DEFAULT_BB_ADAPTER.get('table_header_rows', 6)
+    table_continuation_gap: float = DEFAULT_BB_ADAPTER.get('table_continuation_gap', 0.6)
+    continuation_font_tolerance: float = DEFAULT_BB_ADAPTER.get('continuation_font_tolerance', 0.0)
+    table_extension_min_fraction: float = DEFAULT_BB_ADAPTER.get('table_extension_min_fraction', 0.8)
+    word_gap_height_ratio: float = DEFAULT_BB_ADAPTER.get('word_gap_height_ratio', 0.9)
+    table_header_gap_height_ratio: float = DEFAULT_BB_ADAPTER.get('table_header_gap_height_ratio', 2.5)
+
+    def to_dict(self):
+        return dict(self.__dict__)
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(**d)
+
+
+@dataclass(frozen=True)
 class AdapterRules:
     html: HTMLAdapterRules = field(default_factory=HTMLAdapterRules)
     text: TextAdapterRules = field(default_factory=TextAdapterRules)
     partialsgml: TextAdapterRules = field(default_factory=lambda: TextAdapterRules(DEFAULT_PARTIALSGML_TAB_SIZE))
     pdf: PDFAdapterRules = field(default_factory=PDFAdapterRules)
+    bb: BBAdapterRules = field(default_factory=BBAdapterRules)
 
     def to_dict(self):
         return {'html': self.html.to_dict(), 'text': self.text.to_dict(),
-                'partialsgml': self.partialsgml.to_dict(), 'pdf': self.pdf.to_dict()}
+                'partialsgml': self.partialsgml.to_dict(), 'pdf': self.pdf.to_dict(), 'bb': self.bb.to_dict()}
 
     @classmethod
     def from_dict(cls, d):
         return cls(html=HTMLAdapterRules.from_dict(d.get('html', {})),
                    text=TextAdapterRules.from_dict(d.get('text', {})),
                    partialsgml=TextAdapterRules(tab_size=d.get('partialsgml', {}).get('tab_size', DEFAULT_PARTIALSGML_TAB_SIZE)),
-                   pdf=PDFAdapterRules.from_dict(d.get('pdf', {})))
+                   pdf=PDFAdapterRules.from_dict(d.get('pdf', {})),
+                   bb=BBAdapterRules.from_dict(d.get('bb', {})))
 
 
 # ------------------------------------------------------------------------------------ standardized text
 @dataclass(frozen=True)
 class TextRules:
+    """Text rendering and wrapping; heading protection uses configured rules/styles.
+
+    token_normalizations contains rules with minimum_digit_fraction (0..1),
+    maximum_changes (positive integer), character_map (single-character keys
+    and values), and require_result (a PCRE2 pattern matched in full). Rules
+    run sequentially on whitespace-delimited tokens, ignoring surrounding
+    punctuation but retaining internal punctuation. Digit fractions count
+    ASCII digits over Unicode characters. Source instructions stay intact.
+    merge_adjacent controls final compaction of neighboring text rows; it is
+    independent of geometry-driven join_wrapped_lines.
+    """
     preserve_styles: Tuple[str, ...] = DEFAULT_PRESERVE_STYLES
     join_wrapped_lines: bool = DEFAULT_JOIN_WRAPPED_LINES
     wrap_hyphenation: str = DEFAULT_WRAP_HYPHENATION
+    protect_wrapped_headings: bool = DEFAULT_PROTECT_WRAPPED_HEADINGS
+    token_normalizations: Tuple[dict, ...] = ()
+    merge_adjacent: bool = True
 
     def to_dict(self):
         return {'preserve_styles': list(self.preserve_styles), 'join_wrapped_lines': self.join_wrapped_lines,
-                'wrap_hyphenation': self.wrap_hyphenation}
+                'wrap_hyphenation': self.wrap_hyphenation, 'protect_wrapped_headings': self.protect_wrapped_headings,
+                'token_normalizations': list(self.token_normalizations), 'merge_adjacent': self.merge_adjacent}
 
     @classmethod
     def from_dict(cls, d):
         base = cls()
         return cls(tuple(d.get('preserve_styles', base.preserve_styles)),
                    d.get('join_wrapped_lines', base.join_wrapped_lines),
-                   d.get('wrap_hyphenation', base.wrap_hyphenation))
+                   d.get('wrap_hyphenation', base.wrap_hyphenation),
+                   d.get('protect_wrapped_headings', base.protect_wrapped_headings),
+                   tuple(d.get('token_normalizations', ())),
+                   d.get('merge_adjacent', base.merge_adjacent))
 
 
 @dataclass(frozen=True)
@@ -108,16 +182,18 @@ class HeadingRules:
     styles: Tuple[str, ...] = DEFAULT_INFERRED_HEADING_STYLES
     max_words: int = DEFAULT_HEADING_MAX_WORDS
     merge_adjacent: bool = DEFAULT_MERGE_ADJACENT_HEADINGS
+    use_font_size: bool = DEFAULT_HEADING_USE_FONT_SIZE  # OCR ink-box heights need not indicate type size
 
     def to_dict(self):
         return {'infer': self.infer, 'styles': list(self.styles), 'max_words': self.max_words,
-                'merge_adjacent': self.merge_adjacent}
+                'merge_adjacent': self.merge_adjacent, 'use_font_size': self.use_font_size}
 
     @classmethod
     def from_dict(cls, d):
         base = cls()
         return cls(d.get('infer', base.infer), tuple(d.get('styles', base.styles)),
-                   d.get('max_words', base.max_words), d.get('merge_adjacent', base.merge_adjacent))
+                   d.get('max_words', base.max_words), d.get('merge_adjacent', base.merge_adjacent),
+                   d.get('use_font_size', base.use_font_size))
 
 
 @dataclass(frozen=True)

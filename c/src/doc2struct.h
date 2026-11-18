@@ -63,6 +63,18 @@ typedef struct {
     int clip_to_page, detect_decorations, region_layout;
     int font_recovery; /* 0: selected adapter's original policy, 1: metadata, 2: glyphs. */
 } PdfOptions;
+
+typedef struct {
+    int reject_prose_tables, protect_compact_codes, protect_repeated_entries;
+    int merge_table_headers, protect_table_section_labels;
+    size_t table_lookahead, table_header_rows, table_min_column_rows;
+    double table_continuation_gap, continuation_font_tolerance, table_extension_min_fraction;
+    double word_gap_height_ratio, table_header_gap_height_ratio;
+    size_t prose_min_letters, prose_min_words, prose_min_lines;
+    size_t code_max_words, code_min_rows, repeat_min_count;
+    double prose_min_width_heights, prose_min_mixed_case_fraction;
+    double code_max_width_heights, code_min_fraction, repeat_min_fraction;
+} BbOptions;
 typedef doc2struct_run Run;
 typedef doc2struct_token Token;
 
@@ -98,10 +110,18 @@ typedef struct {
     int needs_href;
 } Remove;
 typedef doc2struct_column Column;
+typedef struct { uint32_t from; Str to; } TokenCharacterMap;
+typedef struct {
+    double minimum_digit_fraction;
+    size_t maximum_changes, map_count;
+    TokenCharacterMap *map;
+    Regex *require_result;
+} TokenNormalization;
 typedef struct doc2struct_rules {
     Arena arena;
     Options html;
     PdfOptions pdf;
+    BbOptions bb;
     size_t text_tab_size, partialsgml_tab_size;
     Regex *regexes;
     Header *headers;
@@ -111,6 +131,8 @@ typedef struct doc2struct_rules {
     size_t nremove;
     Column *columns;
     size_t ncolumns;
+    TokenNormalization *token_normalizations;
+    size_t ntoken_normalizations;
     long repeat_threshold;
     Regex *page_label;
     unsigned table_steps;
@@ -121,7 +143,8 @@ typedef struct doc2struct_rules {
     long list_gap_rows, list_tail_rows;
     int collect_hrefs;
     unsigned preserve_styles, heading_styles;
-    int join_wrapped_lines, remove_wrap_hyphen, infer_headings, merge_adjacent_headings;
+    int join_wrapped_lines, remove_wrap_hyphen, protect_wrapped_headings, infer_headings, heading_use_font_size, merge_adjacent_headings;
+    int merge_adjacent_text;
     long heading_max_words, formatting_max_gap;
     int protect_years;
 } Rules;

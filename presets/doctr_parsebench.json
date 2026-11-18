@@ -1,0 +1,90 @@
+{
+  "namespace": "DOCTR",
+  "rule_sets": {
+    "doctr_parsebench": {
+      "name": "doctr_parsebench",
+      "text": {
+        "preserve_styles": [
+          "bold",
+          "italic",
+          "underline",
+          "strikethrough"
+        ],
+        "join_wrapped_lines": true,
+        "protect_wrapped_headings": false,
+        "merge_adjacent": false,
+        "wrap_hyphenation": "preserve",
+        "token_normalizations": [
+          {
+            "minimum_digit_fraction": 0.75,
+            "character_map": {
+              "o": "0",
+              "O": "0"
+            },
+            "maximum_changes": 1,
+            "require_result": "[0-9]+"
+          }
+        ]
+      },
+      "headings": {
+        "infer": true,
+        "use_font_size": true,
+        "styles": [
+          "bold",
+          "all_caps",
+          "proper_case"
+        ],
+        "max_words": 8,
+        "merge_adjacent": true
+      },
+      "headers": [
+        {
+          "name": "numbered_section",
+          "regex": "(?i)^\\d{1,2}[.)]\\s+[a-z][a-z &/()-]*$",
+          "level": 0,
+          "requires": [
+            "all_caps"
+          ]
+        }
+      ],
+      "tables": {
+        "steps": [
+          "validate_structure"
+        ],
+        "protect_years": true,
+        "formatting_max_gap": 8
+      },
+      "adapters": {
+        "bb": {
+          "reject_prose_tables": true,
+          "prose_min_letters": 20,
+          "prose_min_words": 4,
+          "prose_min_lines": 2,
+          "prose_min_width_heights": 8,
+          "prose_min_mixed_case_fraction": 0.5,
+          "protect_compact_codes": true,
+          "code_max_words": 3,
+          "code_max_width_heights": 6,
+          "code_min_rows": 3,
+          "code_min_fraction": 0.5,
+          "protect_repeated_entries": true,
+          "repeat_min_count": 2,
+          "repeat_min_fraction": 0.5,
+          "merge_table_headers": true,
+          "protect_table_section_labels": true,
+          "table_lookahead": 32,
+          "table_min_column_rows": 2,
+          "table_header_rows": 6,
+          "table_continuation_gap": 0.6,
+          "continuation_font_tolerance": 0.15,
+          "table_extension_min_fraction": 0.5,
+          "word_gap_height_ratio": 0.6,
+          "table_header_gap_height_ratio": 1.0
+        }
+      }
+    }
+  },
+  "document_types": {
+    "PARSEBENCH": "doctr_parsebench"
+  }
+}

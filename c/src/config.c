@@ -5,6 +5,7 @@
 #include <string.h>
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 
 size_t doc2struct_preset_count(void) { return sizeof(embedded_presets)/sizeof(embedded_presets[0]); }
 const char *doc2struct_preset_namespace(size_t i) { return i<doc2struct_preset_count()?embedded_presets[i].name:NULL; }
@@ -105,7 +106,7 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
     static const char *const dtypes[]={"str","int","bool","list",NULL};
     static const char *const which[]={"first","last","all",NULL};
     static const char *const reserved[]={"id","level","type","text","matrix","cleaned","preamble","footnotes","postamble","runs","cell_runs",NULL};
-    static const char *const adapters[]={"html","text","partialsgml","pdf",NULL};
+    static const char *const adapters[]={"html","text","partialsgml","pdf","bb",NULL};
     static const char *const html_fields[]={"hide_hidden_attr","hide_visibility","max_span",NULL};
     Rules *r=calloc(1,sizeof(*r));JValue *v,*c,*sub,*x,*adapter;size_t i,j;long n;
     if(!r){if(error)snprintf(error->message,sizeof(error->message),"out of memory");return NULL;}
@@ -154,6 +155,59 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
             r->pdf.font_recovery=ds_is(x->text,"metadata")?1:ds_is(x->text,"glyphs")?2:0;
         }
     }
+    adapter=field(&r->arena,sub,"bb",J_OBJECT,0);if(!adapter)goto fail;
+    {
+        struct { const char *name; int *value; } booleans[]={
+            {"reject_prose_tables",&r->bb.reject_prose_tables},
+            {"protect_compact_codes",&r->bb.protect_compact_codes},
+            {"protect_repeated_entries",&r->bb.protect_repeated_entries},
+            {"merge_table_headers",&r->bb.merge_table_headers},
+            {"protect_table_section_labels",&r->bb.protect_table_section_labels}};
+        struct { const char *name; size_t *value; } integers[]={
+            {"prose_min_letters",&r->bb.prose_min_letters},{"prose_min_words",&r->bb.prose_min_words},
+            {"prose_min_lines",&r->bb.prose_min_lines},{"code_max_words",&r->bb.code_max_words},
+            {"code_min_rows",&r->bb.code_min_rows},{"repeat_min_count",&r->bb.repeat_min_count},
+            {"table_lookahead",&r->bb.table_lookahead},{"table_header_rows",&r->bb.table_header_rows},
+            {"table_min_column_rows",&r->bb.table_min_column_rows}};
+        struct { const char *name; double *value; int fraction; } decimals[]={
+            {"word_gap_height_ratio",&r->bb.word_gap_height_ratio,0},
+            {"table_header_gap_height_ratio",&r->bb.table_header_gap_height_ratio,0},
+            {"prose_min_width_heights",&r->bb.prose_min_width_heights,0},
+            {"prose_min_mixed_case_fraction",&r->bb.prose_min_mixed_case_fraction,1},
+            {"code_max_width_heights",&r->bb.code_max_width_heights,0},
+            {"code_min_fraction",&r->bb.code_min_fraction,1},
+            {"repeat_min_fraction",&r->bb.repeat_min_fraction,1},
+            {"table_continuation_gap",&r->bb.table_continuation_gap,0},
+            {"continuation_font_tolerance",&r->bb.continuation_font_tolerance,1},
+            {"table_extension_min_fraction",&r->bb.table_extension_min_fraction,1}};
+        for(c=adapter->child;c;c=c->next) {
+            int known=0;
+            for(i=0;i<sizeof(booleans)/sizeof(*booleans);i++)known|=ds_is(c->key,booleans[i].name);
+            for(i=0;i<sizeof(integers)/sizeof(*integers);i++)known|=ds_is(c->key,integers[i].name);
+            for(i=0;i<sizeof(decimals)/sizeof(*decimals);i++)known|=ds_is(c->key,decimals[i].name);
+            if(!known){bad(&r->arena,"unknown BB adapter setting");goto fail;}
+        }
+        for(i=0;i<sizeof(booleans)/sizeof(*booleans);i++) {
+            x=field(&r->arena,adapter,booleans[i].name,J_BOOL,0);if(!x)goto fail;
+            *booleans[i].value=x->boolean;
+        }
+        for(i=0;i<sizeof(integers)/sizeof(*integers);i++) {
+            n=number(r,field(&r->arena,adapter,integers[i].name,J_NUMBER,0));
+            if(n<1){bad(&r->arena,"BB integer settings must be positive");goto fail;}
+            *integers[i].value=(size_t)n;
+        }
+        if(r->bb.table_lookahead>128 || r->bb.table_header_rows>16){bad(&r->arena,"BB table lookahead must be at most 128 and header rows at most 16");goto fail;}
+        for(i=0;i<sizeof(decimals)/sizeof(*decimals);i++) {
+            char *end;double value;
+            x=field(&r->arena,adapter,decimals[i].name,J_NUMBER,0);if(!x)goto fail;
+            errno=0;value=strtod(x->text.p,&end);
+            if(errno==ERANGE||end!=x->text.p+x->text.n||!isfinite(value)||
+               (decimals[i].fraction?(value<0||value>1):value<=0)) {
+                bad(&r->arena,"BB widths must be positive and fractions must be between zero and one");goto fail;
+            }
+            *decimals[i].value=value;
+        }
+    }
     if(r->arena.error[0])goto fail;
     v=field(&r->arena,root,"header_styles",J_ARRAY,0);if(!v)goto fail;
     for(c=v->child;c;c=c->next) {
@@ -190,11 +244,42 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
         r->preserve_styles|=bit;
     }
     x=field(&r->arena,sub,"join_wrapped_lines",J_BOOL,0);if(!x)goto fail;r->join_wrapped_lines=x->boolean;
+    x=field(&r->arena,sub,"protect_wrapped_headings",J_BOOL,0);if(!x)goto fail;r->protect_wrapped_headings=x->boolean;
+    x=field(&r->arena,sub,"merge_adjacent",J_BOOL,0);if(!x)goto fail;r->merge_adjacent_text=x->boolean;
     x=field(&r->arena,sub,"wrap_hyphenation",J_STRING,0);if(!x)goto fail;
     if(!ds_is(x->text,"preserve")&&!ds_is(x->text,"remove")){bad(&r->arena,"wrap_hyphenation must be preserve or remove");goto fail;}
     r->remove_wrap_hyphen=ds_is(x->text,"remove");
+    v=field(&r->arena,sub,"token_normalizations",J_ARRAY,0);if(!v)goto fail;
+    r->ntoken_normalizations=v->count;
+    r->token_normalizations=array(r,v->count,sizeof(TokenNormalization));if(!r->token_normalizations)goto fail;
+    for(c=v->child,i=0;c;c=c->next,i++) {
+        TokenNormalization *rule=r->token_normalizations+i;JValue *mapping,*entry;char *end;
+        static const char *const fields[]={"minimum_digit_fraction","maximum_changes","character_map","require_result",NULL};
+        if(c->type!=J_OBJECT){bad(&r->arena,"token normalization must be an object");goto fail;}
+        for(entry=c->child;entry;entry=entry->next)if(!one_of(entry->key,fields)){bad(&r->arena,"unknown token normalization field");goto fail;}
+        x=field(&r->arena,c,"minimum_digit_fraction",J_NUMBER,0);if(!x)goto fail;
+        errno=0;rule->minimum_digit_fraction=strtod(x->text.p,&end);
+        if(errno==ERANGE || end!=x->text.p+x->text.n || !isfinite(rule->minimum_digit_fraction) ||
+           rule->minimum_digit_fraction<0 || rule->minimum_digit_fraction>1){bad(&r->arena,"minimum_digit_fraction must be in [0,1]");goto fail;}
+        n=number(r,field(&r->arena,c,"maximum_changes",J_NUMBER,0));if(n<1){bad(&r->arena,"maximum_changes must be positive");goto fail;}
+        rule->maximum_changes=(size_t)n;
+        x=field(&r->arena,c,"require_result",J_STRING,0);if(!x)goto fail;
+        rule->require_result=ds_regex(r,text(r,x),0);if(!rule->require_result)goto fail;
+        mapping=field(&r->arena,c,"character_map",J_OBJECT,0);if(!mapping)goto fail;
+        rule->map_count=mapping->count;rule->map=array(r,mapping->count,sizeof(TokenCharacterMap));if(!rule->map)goto fail;
+        for(entry=mapping->child,j=0;entry;entry=entry->next,j++) {
+            size_t consumed;Str to=text(r,entry);
+            if(!entry->key.n || !to.n) {bad(&r->arena,"character_map requires single-character keys and values");goto fail;}
+            rule->map[j].from=ds_utf8(entry->key.p,entry->key.n,&consumed);
+            if(consumed!=entry->key.n){bad(&r->arena,"character_map key must be one character");goto fail;}
+            ds_utf8(to.p,to.n,&consumed);
+            if(consumed!=to.n){bad(&r->arena,"character_map value must be one character");goto fail;}
+            rule->map[j].to=to;
+        }
+    }
     sub=field(&r->arena,root,"headings",J_OBJECT,0);if(!sub)goto fail;
     x=field(&r->arena,sub,"infer",J_BOOL,0);if(!x)goto fail;r->infer_headings=x->boolean;
+    x=field(&r->arena,sub,"use_font_size",J_BOOL,0);if(!x)goto fail;r->heading_use_font_size=x->boolean;
     x=field(&r->arena,sub,"merge_adjacent",J_BOOL,0);if(!x)goto fail;r->merge_adjacent_headings=x->boolean;
     r->heading_max_words=number(r,field(&r->arena,sub,"max_words",J_NUMBER,0));
     if(r->heading_max_words<0){bad(&r->arena,"headings.max_words must be nonnegative");goto fail;}

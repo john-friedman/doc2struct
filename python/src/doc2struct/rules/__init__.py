@@ -26,7 +26,7 @@ from typing import Optional, Union
 
 from .. import _native
 
-from .types import (AdapterRules, HTMLAdapterRules, PDFAdapterRules, TextAdapterRules, CustomColumn, HeaderRule,
+from .types import (AdapterRules, HTMLAdapterRules, PDFAdapterRules, BBAdapterRules, TextAdapterRules, CustomColumn, HeaderRule,
                     ListRules, RemoveRules, Rules, TableRules, TextRules, HeadingRules)
 
 _PACKS = None

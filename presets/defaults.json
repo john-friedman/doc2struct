@@ -17,6 +17,32 @@
       "detect_decorations": false,
       "layout": "default",
       "font_recovery": "default"
+    },
+    "bb": {
+      "word_gap_height_ratio": 0.9,
+      "table_header_gap_height_ratio": 2.5,
+      "reject_prose_tables": false,
+      "prose_min_letters": 20,
+      "prose_min_words": 4,
+      "prose_min_lines": 2,
+      "prose_min_width_heights": 8,
+      "prose_min_mixed_case_fraction": 0.5,
+      "protect_compact_codes": true,
+      "code_max_words": 3,
+      "code_max_width_heights": 6,
+      "code_min_rows": 3,
+      "code_min_fraction": 0.5,
+      "protect_repeated_entries": true,
+      "repeat_min_count": 2,
+      "repeat_min_fraction": 0.5,
+      "merge_table_headers": false,
+      "protect_table_section_labels": false,
+      "table_lookahead": 8,
+      "table_min_column_rows": 1,
+      "table_header_rows": 6,
+      "table_continuation_gap": 0.6,
+      "continuation_font_tolerance": 0.0,
+      "table_extension_min_fraction": 0.8
     }
   },
   "headers": [],
@@ -86,10 +112,14 @@
   "text": {
     "preserve_styles": [],
     "join_wrapped_lines": false,
+    "protect_wrapped_headings": false,
+    "token_normalizations": [],
+    "merge_adjacent": true,
     "wrap_hyphenation": "preserve"
   },
   "headings": {
     "infer": true,
+    "use_font_size": true,
     "styles": [
       "bold",
       "italic",

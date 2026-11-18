@@ -16,7 +16,9 @@ def convert_bb_to_instructions(pages, rules=None):
 
     Pages are in document order; boxes may be unordered. Blocks and lines are
     document-wide. soft_break hints describe geometry independently of rules;
-    join_wrapped_lines controls their use during standardization. Pass the same
-    rules to convert_instructions_to_standardized_text for staged conversion.
+    join_wrapped_lines controls their use during standardization. adapters.bb
+    controls optional prose/table judgments, including the criteria enabled by
+    BB:PARSEBENCH. Pass the same rules here and to
+    convert_instructions_to_standardized_text for staged conversion.
     """
     return _native.bb_instructions(pages, prepare(rules))

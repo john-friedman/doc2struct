@@ -108,9 +108,15 @@ The first usecase of doc2struct will be processing every SEC html, pdf, and text
 ```python
 # Parse directly to standardized text
 standardized_text = parse_html(html, rules=None)
-standardized_text = parse_pdf(pdf, rules=None)
 standardized_text = parse_text(text, rules=None)
 standardized_text = parse_partialsgml(text, rules=None)
+standardized_text = parse_pdf(pdf, rules=None)
+
+# Experimental pdf replacement. Scores ~60% on v2 of https://github.com/run-llama/ParseBench with preset
+standardized_text = parse_pdf(pdf,rules=None, adapter="pdf_adapter_experimental")
+
+# Parse bounding boxes. OCR -> standardized text
+standardized_text = parse_bb(pages, rules="BB:PARSEBENCH")
 
 # Convert to instructions
 instructions = convert_html_to_instructions(html, rules=None)
@@ -270,6 +276,8 @@ With the 10-K preset
 
 Left to right reading orientation, y used to calculate new lines. In the future this will change to support other reading alignments.
 
+Try the experimental adapter for better (slower) output.
+
 **Convert instructions to standardized text**
 
 Same as for HTML.
@@ -331,7 +339,7 @@ pages = [
 ]
 
 # OCR -> instructions -> standardized_text
-rows = doc2struct.parse_bb(pages, rules="SEC:10-K")
+standardized_text = doc2struct.parse_bb(pages, rules="SEC:10-K")
 ```
 
 ### Instruction definition
@@ -467,7 +475,13 @@ Here is the full default ruleset (as of 11/3/2026)
 
 ## Presets
 
-doc2struct has a default set of rules in presets/defaults.json, it also has SEC filing presets in presets/sec_filings.json for 900+ SEC document types.
+doc2struct has a default set of rules in presets/defaults.json. It also has: 
+
+- SEC filing presets in presets/sec_filings.json for 900+ SEC document types.
+- ParseBench presets in presets/pdf_parsebench.json (experimental pdf adapter)
+- ParseBench presets in presets/bb_parsebench.json (with Paddle OCR Medium)
+- ParseBench presets in presets/doctr_parsebench.json (doctr + resnet)
+
 
 ## Adding adapters.
 
