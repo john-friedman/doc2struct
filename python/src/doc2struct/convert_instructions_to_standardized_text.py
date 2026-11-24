@@ -20,7 +20,9 @@ level are joined with spaces. Type/level changes and all other types end the blo
 
 When headings.merge_adjacent is enabled, adjacent titles at the same level
 also join when their first source runs match
-in style flags, font size and indentation. This runs before table-title inheritance
+in style flags, font size and indentation. A title matched by a HeaderRule is
+never merged into the title before it, so consecutive rule headings stay separate
+sections. This runs before table-title inheritance
 and retains the first title's classification and every source item's metadata.
 
 text.preserve_styles opts into an additional runs field on non-table rows:
