@@ -1210,6 +1210,8 @@ static int same_title_style(const Row *a, const Row *b) {
 }
 enum { MERGE_TEXT, MERGE_TITLES };
 /* Titles use their first source run's formatting, as heading detection does.
+ * A title matched by a header rule starts its own section, so it is never
+ * merged into the title before it ("ITEM 6. RESERVED" then "ITEM 7. ...").
  * Merge them before table-title inheritance; compact prose after annotations.
  * Every merge retains source items and links for custom columns. */
 static int merge_rows(Document *d, int kind) {
@@ -1223,7 +1225,7 @@ static int merge_rows(Document *d, int kind) {
                     ds_is(block.type, "text") || ds_is(block.type, "textsmall")) {
             while (j < d->rows.n && ds_eq(rows[j].type, block.type) &&
                    rows[j].level == block.level &&
-                   (!title || same_title_style(&block, rows + j)))
+                   (!title || (!rows[j].title.n && same_title_style(&block, rows + j))))
                 j++;
             if (j > i + 1) {
                 Vec parts = {0}, items = {0};
