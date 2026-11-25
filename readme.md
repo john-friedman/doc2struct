@@ -1,6 +1,8 @@
 # doc2struct
 
-doc2struct is an algorithm that can parse documents fast on one thread. It has been released in alpha, due to demand. Will be polished.
+doc2struct is an algorithm that can parse documents fast on one thread. Scores #2 on [ParseBench restricted to SEC Filings](https://github.com/john-friedman/ParseBench-limited-to-SEC-Filings).
+
+> Doc2struct has been released in alpha, due to demand. Will be polished.
 
 ![Parsing a document](image.png)
 
