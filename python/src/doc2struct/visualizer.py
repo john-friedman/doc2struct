@@ -219,7 +219,7 @@ def visualize_standardized_text(rows, filename='standardized_text_visualization.
     rows = list(rows)
     out = [_CSS]
     sections = [r for r in rows if r['type'] == 'title' and r.get('id') is not None
-                and r.get('class') not in (None, 'introduction', 'predicted header')]
+                and r.get('class') not in (None, 'predicted header')]
     if sections:
         out.append(f"<details class='outline'><summary>Recognized sections ({len(sections)})</summary><nav>")
         for r in sections:

@@ -102,7 +102,7 @@ typedef struct doc2struct_regex {
 typedef struct {
     Str name;
     Regex *rx;
-    int level, has_requires;
+    int level, has_requires, repeat_redundant;
     unsigned requires;
 } Header;
 typedef struct {
@@ -126,9 +126,13 @@ typedef struct doc2struct_rules {
     Regex *regexes;
     Header *headers;
     size_t nheaders;
+    Regex **heading_split_before;
+    size_t nheading_split_before;
     unsigned header_styles;
     Remove *remove;
     size_t nremove;
+    Regex **linked_regions;
+    size_t nlinked_regions;
     Column *columns;
     size_t ncolumns;
     TokenNormalization *token_normalizations;
@@ -143,7 +147,7 @@ typedef struct doc2struct_rules {
     long list_gap_rows, list_tail_rows;
     int collect_hrefs;
     unsigned preserve_styles, heading_styles;
-    int join_wrapped_lines, remove_wrap_hyphen, protect_wrapped_headings, infer_headings, heading_use_font_size, merge_adjacent_headings;
+    int join_wrapped_lines, remove_wrap_hyphen, protect_wrapped_headings, infer_headings, heading_use_font_size, merge_adjacent_headings, recognize_inferred_headings;
     int merge_adjacent_text;
     long heading_max_words, formatting_max_gap;
     int protect_years;
@@ -164,7 +168,7 @@ typedef struct {
     Item *items;
     size_t nitems;
     Matrix matrix;
-    int level, predicted;
+    int level, predicted, repeat_redundant;
     unsigned attrs;
     Str klass, title;
     struct ListLines *list;
@@ -238,6 +242,7 @@ Str ds_join(Arena *, Str *, size_t, Str);
 Str ds_strip(Str, int);
 Str ds_lower(Arena *, Str);
 Str ds_rule_text(Arena *, Str);
+size_t ds_rule_offset(Str, size_t);
 int ds_space(uint32_t);
 int ds_upper(Str);
 int ds_proper(Str);
@@ -276,6 +281,7 @@ Str ds_json(Document *, const Rules *, int, Arena *);
 int ds_tables(Document *, const Rules *);
 Regex *ds_regex(Rules *, Str, int);
 int ds_match(Document *, Regex *, Str, int);
+int ds_search(Document *, Regex *, Str, size_t);
 Str ds_group(Document *, Str, unsigned);
 Str ds_column_replace(Document *, const Column *, Str);
 void ds_rules_free(Rules *);

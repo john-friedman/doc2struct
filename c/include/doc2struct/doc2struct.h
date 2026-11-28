@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define DOC2STRUCT_VERSION "0.1.7"
+#define DOC2STRUCT_VERSION "0.1.8"
 #define DOC2STRUCT_DEFAULT_CACHE_SIZE ((size_t)8 * 1024 * 1024)
 typedef struct doc2struct_rules doc2struct_rules;
 typedef struct doc2struct_parser doc2struct_parser;
@@ -207,7 +207,7 @@ char *doc2struct_document_json(doc2struct_document *, const doc2struct_rules *, 
                               size_t *size, doc2struct_error *error);
 /* Render rows in their supplied document order. Pipe tables use an empty
  * header and retain every source row. Layout whitespace is collapsed; source
- * Markdown is escaped. The generated opening introduction title is suppressed.
+ * Markdown is escaped. All supplied source headings are rendered.
  * Heading depths above six become bold paragraphs. Images retain their alt text
  * as placeholders. Table captions matching the current heading are not repeated.
  * Returns a NUL-terminated UTF-8 buffer (including for empty input); free with

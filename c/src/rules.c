@@ -130,7 +130,7 @@ Regex *ds_regex(Rules *r, Str pattern, int caseless) {
     r->regexes = rx;
     return rx;
 }
-int ds_match(Document *d, Regex *rx, Str text, int search) {
+static int match_at(Document *d, Regex *rx, Str text, int search, size_t offset) {
     int rc;
     size_t need;
     if (!rx)
@@ -162,7 +162,7 @@ int ds_match(Document *d, Regex *rx, Str text, int search) {
         d->match = next;
         d->match_pairs = need;
     }
-    rc = pcre2_match(rx->code, (PCRE2_SPTR)(text.p ? text.p : ""), text.n, 0,
+    rc = pcre2_match(rx->code, (PCRE2_SPTR)(text.p ? text.p : ""), text.n, offset,
                      PCRE2_NO_UTF_CHECK | (search ? 0 : PCRE2_ANCHORED), d->match, NULL);
     if (rc >= 0)
         return 1;
@@ -172,6 +172,12 @@ int ds_match(Document *d, Regex *rx, Str text, int search) {
         snprintf(d->arena.error, sizeof(d->arena.error), "native regex match: %s", (char *)msg);
     }
     return 0;
+}
+int ds_match(Document *d, Regex *rx, Str text, int search) {
+    return match_at(d, rx, text, search, 0);
+}
+int ds_search(Document *d, Regex *rx, Str text, size_t offset) {
+    return match_at(d, rx, text, 1, offset);
 }
 Str ds_group(Document *d, Str text, unsigned group) {
     PCRE2_SIZE *o = pcre2_get_ovector_pointer(d->match);

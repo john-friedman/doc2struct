@@ -52,6 +52,7 @@
     "proper_case"
   ],
   "remove": {
+    "linked_regions": [],
     "patterns": [
       [
         "^\\d+$",
@@ -118,6 +119,8 @@
     "wrap_hyphenation": "preserve"
   },
   "headings": {
+    "recognize_inferred": false,
+    "split_before": [],
     "infer": true,
     "use_font_size": true,
     "styles": [

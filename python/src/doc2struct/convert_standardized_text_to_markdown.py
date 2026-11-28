@@ -14,8 +14,8 @@ def convert_standardized_text_to_markdown(standardized_text, *, redundant='block
     contain zero-based row/col coordinates and their styled runs.
     Table notes retain their original markers. List matrices contain
     [relative_depth, item_text] string pairs; unsupported legal markers remain
-    literal inside bullets. Images become alt-text placeholders. The generated
-    opening 'introduction' title is suppressed, and headings beyond level 5 become
+    literal inside bullets. Images become alt-text placeholders. All supplied
+    headings are rendered, and headings beyond level 5 become
     bold paragraphs. Returns an empty string for an empty document.
 
     Save the returned string with UTF-8 encoding when a file is required.

@@ -387,6 +387,36 @@ Str ds_rule_text(Arena *a, Str source) {
     return (Str){buffer, used};
 }
 
+/* Map a normalized rule-text byte boundary back to the original display text.
+ * Lowercase expansions and collapsed whitespace must not shift source slices.
+ * Contextual sigma changes the character, but not its encoded length. */
+size_t ds_rule_offset(Str source, size_t offset) {
+    size_t i = 0, used = 0, blank = 0;
+    int space = 0;
+    while (i < source.n) {
+        size_t step, width;
+        uint32_t cp = ds_utf8(source.p + i, source.n - i, &step);
+        const UnicodeEntry *e;
+        if (ds_space(cp) || cp == 0x200b) {
+            if (!space) blank = i;
+            space = used != 0;
+            i += step;
+            continue;
+        }
+        if (space) {
+            if (offset == used) return blank;
+            used++;
+            space = 0;
+        }
+        e = cp >= 128 ? entry(cp) : NULL;
+        width = e && e->lower ? strlen(e->lower) : step;
+        if (offset < used + width) return i;
+        used += width;
+        i += step;
+    }
+    return source.n;
+}
+
 int ds_stop_word(Str word) {
     size_t j;
     static const char *stops[] = {"and", "or",  "of",   "the", "in", "on", "at",

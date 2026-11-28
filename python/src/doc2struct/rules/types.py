@@ -16,7 +16,8 @@ from .defaults import (DEFAULT_HEADER_STYLES, DEFAULT_FOOTNOTE_LINES, DEFAULT_FO
                        DEFAULT_JOIN_WRAPPED_LINES, DEFAULT_WRAP_HYPHENATION, DEFAULT_PROTECT_WRAPPED_HEADINGS,
                        DEFAULT_INFER_HEADINGS, DEFAULT_INFERRED_HEADING_STYLES,
                        DEFAULT_HEADING_MAX_WORDS, DEFAULT_MERGE_ADJACENT_HEADINGS,
-                       DEFAULT_HEADING_USE_FONT_SIZE,
+                       DEFAULT_HEADING_USE_FONT_SIZE, DEFAULT_HEADING_SPLIT_BEFORE,
+                       DEFAULT_RECOGNIZE_INFERRED_HEADINGS, DEFAULT_LINKED_REGIONS,
                        DEFAULT_PROTECT_YEARS, DEFAULT_FORMATTING_MAX_GAP,
                        DEFAULT_PDF_CLIP_TO_PAGE, DEFAULT_PDF_DETECT_DECORATIONS,
                        DEFAULT_PDF_LAYOUT, DEFAULT_PDF_FONT_RECOVERY, DEFAULT_BB_ADAPTER)
@@ -178,22 +179,36 @@ class TextRules:
 
 @dataclass(frozen=True)
 class HeadingRules:
+    """split_before matches normalized heading rows, retaining source formatting.
+
+    A row must match one configured pattern at its beginning; later matches
+    start separate rows. Tables, lists, images and redundant rows are excluded.
+    Patterns see the same lowercased, whitespace-normalized text as HeaderRule.
+    recognize_inferred matches complete captions on rows already identified
+    as titles by inference, retaining their inferred level. Those rows use
+    the inference policy instead of an explicit header's style requirements.
+    """
     infer: bool = DEFAULT_INFER_HEADINGS
     styles: Tuple[str, ...] = DEFAULT_INFERRED_HEADING_STYLES
     max_words: int = DEFAULT_HEADING_MAX_WORDS
     merge_adjacent: bool = DEFAULT_MERGE_ADJACENT_HEADINGS
     use_font_size: bool = DEFAULT_HEADING_USE_FONT_SIZE  # OCR ink-box heights need not indicate type size
+    split_before: Tuple[str, ...] = DEFAULT_HEADING_SPLIT_BEFORE
+    recognize_inferred: bool = DEFAULT_RECOGNIZE_INFERRED_HEADINGS
 
     def to_dict(self):
         return {'infer': self.infer, 'styles': list(self.styles), 'max_words': self.max_words,
-                'merge_adjacent': self.merge_adjacent, 'use_font_size': self.use_font_size}
+                'merge_adjacent': self.merge_adjacent, 'use_font_size': self.use_font_size,
+                'split_before': list(self.split_before), 'recognize_inferred': self.recognize_inferred}
 
     @classmethod
     def from_dict(cls, d):
         base = cls()
         return cls(d.get('infer', base.infer), tuple(d.get('styles', base.styles)),
                    d.get('max_words', base.max_words), d.get('merge_adjacent', base.merge_adjacent),
-                   d.get('use_font_size', base.use_font_size))
+                   d.get('use_font_size', base.use_font_size),
+                   tuple(d.get('split_before', base.split_before)),
+                   d.get('recognize_inferred', base.recognize_inferred))
 
 
 @dataclass(frozen=True)
@@ -202,14 +217,17 @@ class RemoveRules:
 
     Page-label candidates also require small type or repeated distinct labels;
     semantic headings and large type are protected.
+    linked_regions marks a configured navigation marker and consecutive fully
+    linked rows redundant, stopping at the first ordinary content row.
     """
     patterns: Tuple[Tuple[str, bool], ...] = STANDARD_REMOVE   # (regex on lowercased text, only_if_link)
     repeat_threshold: Optional[int] = DEFAULT_REPEAT_THRESHOLD  # mark text occurring this often; None = off
     page_label_regex: Optional[str] = DEFAULT_PAGE_LABEL_REGEX  # candidate labels; None = off
+    linked_regions: Tuple[str, ...] = DEFAULT_LINKED_REGIONS  # marker followed by consecutive fully linked rows
 
     def to_dict(self):
         return {'patterns': [list(p) for p in self.patterns], 'repeat_threshold': self.repeat_threshold,
-                'page_label_regex': self.page_label_regex}
+                'page_label_regex': self.page_label_regex, 'linked_regions': list(self.linked_regions)}
 
     @classmethod
     def from_dict(cls, d):
@@ -217,7 +235,8 @@ class RemoveRules:
         pats = d.get('patterns')
         return cls(patterns=tuple((p[0], bool(p[1])) for p in pats) if pats is not None else base.patterns,
                    repeat_threshold=d.get('repeat_threshold', base.repeat_threshold),
-                   page_label_regex=d.get('page_label_regex', base.page_label_regex))
+                   page_label_regex=d.get('page_label_regex', base.page_label_regex),
+                   linked_regions=tuple(d.get('linked_regions', base.linked_regions)))
 
 
 @dataclass(frozen=True)
@@ -226,16 +245,20 @@ class HeaderRule:
     regex: str                         # matched against the complete lowercased, whitespace-normalized line
     level: int                         # nesting level, 0 = outermost
     requires: Optional[Tuple[str, ...]] = None  # None inherits any shared style; () permits unstyled; otherwise all required
+    repeat: str = 'keep'                # redundant: identical/bare captions; active: any caption with the active identity
 
     def to_dict(self):
         d = {'name': self.name, 'regex': self.regex, 'level': self.level}
         if self.requires is not None:
             d['requires'] = list(self.requires)
+        if self.repeat != 'keep':
+            d['repeat'] = self.repeat
         return d
 
     @classmethod
     def from_dict(cls, d):
-        return cls(d['name'], d['regex'], int(d['level']), tuple(d['requires']) if 'requires' in d else None)
+        return cls(d['name'], d['regex'], int(d['level']), tuple(d['requires']) if 'requires' in d else None,
+                   d.get('repeat', 'keep'))
 
 
 @dataclass(frozen=True)

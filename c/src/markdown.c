@@ -278,7 +278,6 @@ char *doc2struct_convert_standardized_text_to_markdown(const Row *rows, size_t c
         const Row *r = rows + i;
         if (r->removed) continue;
         if (is(r->type, "title")) {
-            if (i == 0 && r->id == 0 && r->level == 0 && is(r->text, "introduction")) continue;
             heading = r->text;
             if (!r->text.n) continue;
             if (!block(&w)) goto failed;

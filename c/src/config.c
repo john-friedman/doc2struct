@@ -227,6 +227,11 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
         x=field(&r->arena,c,"regex",J_STRING,0);
         if(r->arena.error[0]||!x)goto fail;
         h->rx=ds_regex(r,x->text,0);if(!h->rx)goto fail;
+        x=field(&r->arena,c,"repeat",J_STRING,1);
+        if(x) {
+            if(!ds_is(x->text,"keep")&&!ds_is(x->text,"redundant")&&!ds_is(x->text,"active")){bad(&r->arena,"header repeat must be keep, redundant or active");goto fail;}
+            h->repeat_redundant=ds_is(x->text,"active")?2:ds_is(x->text,"redundant");
+        }
         x=field(&r->arena,c,"requires",J_ARRAY,1);
         h->has_requires=x!=NULL;
         if(x)for(x=x->child;x;x=x->next) {
@@ -280,7 +285,16 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
     sub=field(&r->arena,root,"headings",J_OBJECT,0);if(!sub)goto fail;
     x=field(&r->arena,sub,"infer",J_BOOL,0);if(!x)goto fail;r->infer_headings=x->boolean;
     x=field(&r->arena,sub,"use_font_size",J_BOOL,0);if(!x)goto fail;r->heading_use_font_size=x->boolean;
+    x=field(&r->arena,sub,"recognize_inferred",J_BOOL,0);if(!x)goto fail;r->recognize_inferred_headings=x->boolean;
     x=field(&r->arena,sub,"merge_adjacent",J_BOOL,0);if(!x)goto fail;r->merge_adjacent_headings=x->boolean;
+    v=field(&r->arena,sub,"split_before",J_ARRAY,0);if(!v)goto fail;
+    r->nheading_split_before=v->count;
+    r->heading_split_before=array(r,v->count,sizeof(Regex*));if(!r->heading_split_before)goto fail;
+    for(c=v->child,i=0;c;c=c->next,i++) {
+        Str pattern=text(r,c);
+        if(!pattern.n){bad(&r->arena,"headings.split_before requires nonempty regex strings");goto fail;}
+        r->heading_split_before[i]=ds_regex(r,pattern,0);if(!r->heading_split_before[i])goto fail;
+    }
     r->heading_max_words=number(r,field(&r->arena,sub,"max_words",J_NUMBER,0));
     if(r->heading_max_words<0){bad(&r->arena,"headings.max_words must be nonnegative");goto fail;}
     v=field(&r->arena,sub,"styles",J_ARRAY,0);if(!v)goto fail;
@@ -295,6 +309,13 @@ static Rules *compile(JValue *root,doc2struct_error *error) {
     x=ds_config_get(sub,"page_label_regex");
     if(x&&x->type!=J_NULL&&x->type!=J_STRING){bad(&r->arena,"invalid page_label_regex");goto fail;}
     if(x&&x->type==J_STRING&&x->text.n){r->page_label=ds_regex(r,x->text,0);if(!r->page_label)goto fail;}
+    v=field(&r->arena,sub,"linked_regions",J_ARRAY,0);if(!v)goto fail;
+    r->nlinked_regions=v->count;r->linked_regions=array(r,v->count,sizeof(Regex*));if(!r->linked_regions)goto fail;
+    for(c=v->child,i=0;c;c=c->next,i++) {
+        Str pattern=text(r,c);
+        if(!pattern.n){bad(&r->arena,"remove.linked_regions requires nonempty regex strings");goto fail;}
+        r->linked_regions[i]=ds_regex(r,pattern,0);if(!r->linked_regions[i])goto fail;
+    }
     v=field(&r->arena,sub,"patterns",J_ARRAY,0);if(!v)goto fail;
     r->nremove=v->count;r->remove=array(r,v->count,sizeof(Remove));if(!r->remove)goto fail;
     for(c=v->child,i=0;c;c=c->next,i++) {
